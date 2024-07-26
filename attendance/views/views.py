@@ -25,6 +25,7 @@ from django.core.paginator import Paginator
 from django.db.models import ProtectedError
 from django.http import HttpResponse, HttpResponseRedirect, JsonResponse
 from django.shortcuts import redirect, render
+from django.urls import reverse
 from django.utils.translation import gettext as __
 from django.utils.translation import gettext_lazy as _
 from django.views.decorators.http import require_http_methods
@@ -73,9 +74,11 @@ from base.methods import (
     get_pagination,
 )
 from base.models import EmployeeShiftSchedule
+from employee.filters import EmployeeFilter
 from employee.models import Employee, EmployeeWorkInformation
 from horilla.decorators import (
     hx_request_required,
+    install_required,
     login_required,
     manager_can_enter,
     permission_required,
@@ -311,7 +314,6 @@ def attendance_import(request):
 
 
 @login_required
-@hx_request_required
 def attendance_export(request):
     resolver_match = request.resolver_match
     if (
@@ -1001,6 +1003,7 @@ def on_time_view(request):
 
 
 @login_required
+@install_required
 def late_come_early_out_view(request):
     """
     This method render template to view all late come early out entries
@@ -1041,6 +1044,8 @@ def late_come_early_out_view(request):
     )
 
 
+@login_required
+@hx_request_required
 def late_in_early_out_single_view(request, obj_id):
     request_copy = request.GET.copy()
     request_copy.pop("instances_ids", None)
@@ -1063,6 +1068,7 @@ def late_in_early_out_single_view(request, obj_id):
 
 @login_required
 @permission_required("attendance.delete_attendancelatecomeearlyout")
+@hx_request_required
 @require_http_methods(["POST"])
 def late_come_early_out_delete(request, obj_id):
     """
@@ -1227,7 +1233,7 @@ def validate_bulk_attendance(request):
                 verb_de=f"Ihre Anwesenheit für das Datum {attendance.attendance_date} wurde bestätigt",
                 verb_es=f"Se ha validado su asistencia para la fecha {attendance.attendance_date}",
                 verb_fr=f"Votre présence pour la date {attendance.attendance_date} est validée",
-                redirect=f"/attendance/view-my-attendance?id={attendance.id}",
+                redirect=reverse("view-my-attendance") + f"?id={attendance.id}",
                 icon="checkmark",
             )
         except (Attendance.DoesNotExist, OverflowError, ValueError):
@@ -1264,7 +1270,7 @@ def validate_this_attendance(request, obj_id):
             verb_de=f"Deine Anwesenheit für das Datum {attendance.attendance_date} ist bestätigt.",
             verb_es=f"Se valida tu asistencia para la fecha {attendance.attendance_date}.",
             verb_fr=f"Votre présence pour la date {attendance.attendance_date} est validée.",
-            redirect=f"/attendance/view-my-attendance?id={attendance.id}",
+            redirect=reverse("view-my-attendance") + f"?id={attendance.id}",
             icon="checkmark",
         )
     except (Attendance.DoesNotExist, ValueError):
@@ -1303,7 +1309,7 @@ def revalidate_this_attendance(request, obj_id):
                     para la asistencia del {attendance.attendance_date}",
                 verb_fr=f"{attendance.employee_id} a demandé une revalidation pour la \
                     présence du {attendance.attendance_date}",
-                redirect=f"/attendance/view-my-attendance?id={attendance.id}",
+                redirect=reverse("view-my-attendance") + f"?id={attendance.id}",
                 icon="refresh",
             )
         return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
@@ -1342,7 +1348,7 @@ def approve_overtime(request, obj_id):
                     {attendance.attendance_date}.",
                 verb_fr=f"Les heures supplémentaires pour la date\
                       {attendance.attendance_date} ont été approuvées.",
-                redirect=f"/attendance/attendance-overtime-view?id={attendance.id}",
+                redirect=reverse("attendance-overtime-view") + f"?id={attendance.id}",
                 icon="checkmark",
             )
     except (Attendance.DoesNotExist, OverflowError):
@@ -1377,7 +1383,7 @@ def approve_bulk_overtime(request):
                     {attendance.attendance_date}",
                 verb_fr=f"Heures supplémentaires approuvées pour la présence du \
                     {attendance.attendance_date}",
-                redirect=f"/attendance/attendance-overtime-view?id={attendance.id}",
+                redirect=reverse("attendance-overtime-view") + f"?id={attendance.id}",
                 icon="checkmark",
             )
         except (Attendance.DoesNotExist, OverflowError, ValueError):
@@ -1679,6 +1685,7 @@ def latecome_attendance_select_filter(request):
 
 
 @login_required
+@hx_request_required
 @permission_required("attendance.add_gracetime")
 def create_grace_time(request):
     """
@@ -1708,6 +1715,7 @@ def create_grace_time(request):
 
 
 @login_required
+@hx_request_required
 @permission_required("attendance.change_gracetime")
 def update_grace_time(request, grace_id):
     """
@@ -1756,39 +1764,41 @@ def delete_grace_time(request, grace_id):
         messages.error(request, _("Grace Time Does not exists.."))
     except ProtectedError:
         messages.error(request, _("Related datas exists."))
-    if request.GET.get("view") == "shift":
-        return redirect("/settings/grace-settings-view")
-    else:
-        return redirect("/settings/grace-settings-view")
+    context = {
+        "condition": AttendanceValidationCondition.objects.first(),
+        "default_grace_time": GraceTime.objects.filter(is_default=True).first(),
+        "grace_times": GraceTime.objects.all().exclude(is_default=True),
+    }
+
+    return render(request, "attendance/grace_time/grace_time_table.html", context)
 
 
 @login_required
 @permission_required("attendance.update_gracetime")
-def update_isactive_gracetime(request):
+def update_isactive_gracetime(request, obj_id):
     """
     ajax function to update is active field in grace time.
     Args:
-    - isChecked: Boolean value representing the state of grace time,
-    - graceId: Id of grace time object
+    - is_active: Boolean value representing the state of grace time,
+    - obj_id: Id of grace time object
     """
-    isChecked = request.POST.get("isChecked")
-    graceId = request.POST.get("graceId")
-    grace_time = GraceTime.objects.get(id=graceId)
-    if isChecked == "true":
+    is_active = request.POST.get("is_active")
+    grace_time = GraceTime.objects.get(id=obj_id)
+    if is_active == "on":
         grace_time.is_active = True
-
-        response = {
-            "type": "success",
-            "message": _("Default grace time activated successfully."),
-        }
+        messages.success(request, _("Grace time activated successfully."))
     else:
         grace_time.is_active = False
-        response = {
-            "type": "success",
-            "message": _("Default grace time deactivated successfully."),
-        }
+        messages.success(request, _("Grace time deactivated successfully."))
     grace_time.save()
-    return JsonResponse(response)
+
+    context = {
+        "condition": AttendanceValidationCondition.objects.first(),
+        "default_grace_time": GraceTime.objects.filter(is_default=True).first(),
+        "grace_times": GraceTime.objects.all().exclude(is_default=True),
+    }
+
+    return render(request, "attendance/grace_time/grace_time_table.html", context)
 
 
 @login_required
@@ -1839,7 +1849,8 @@ def create_attendancerequest_comment(request, attendance_id):
                             verb_de=f"{attendance.employee_id}s Anfrage zur Anwesenheit hat einen Kommentar erhalten.",
                             verb_es=f"La solicitud de asistencia de {attendance.employee_id} ha recibido un comentario.",
                             verb_fr=f"La demande de présence de {attendance.employee_id} a reçu un commentaire.",
-                            redirect=f"/attendance/request-attendance-view?id={attendance.id}",
+                            redirect=reverse("request-attendance-view")
+                            + f"?id={attendance.id}",
                             icon="chatbox-ellipses",
                         )
                     elif (
@@ -1855,7 +1866,8 @@ def create_attendancerequest_comment(request, attendance_id):
                             verb_de="Ihr Antrag auf Anwesenheit hat einen Kommentar erhalten.",
                             verb_es="Tu solicitud de asistencia ha recibido un comentario.",
                             verb_fr="Votre demande de présence a reçu un commentaire.",
-                            redirect=f"/attendance/request-attendance-view?id={attendance.id}",
+                            redirect=reverse("request-attendance-view")
+                            + f"?id={attendance.id}",
                             icon="chatbox-ellipses",
                         )
                     else:
@@ -1871,7 +1883,8 @@ def create_attendancerequest_comment(request, attendance_id):
                             verb_de=f"{attendance.employee_id}s Anfrage zur Anwesenheit hat einen Kommentar erhalten.",
                             verb_es=f"La solicitud de asistencia de {attendance.employee_id} ha recibido un comentario.",
                             verb_fr=f"La demande de présence de {attendance.employee_id} a reçu un commentaire.",
-                            redirect=f"/attendance/request-attendance-view?id={attendance.id}",
+                            redirect=reverse("request-attendance-view")
+                            + f"?id={attendance.id}",
                             icon="chatbox-ellipses",
                         )
                 else:
@@ -1884,7 +1897,8 @@ def create_attendancerequest_comment(request, attendance_id):
                         verb_de="Ihr Antrag auf Anwesenheit hat einen Kommentar erhalten.",
                         verb_es="Tu solicitud de asistencia ha recibido un comentario.",
                         verb_fr="Votre demande de présence a reçu un commentaire.",
-                        redirect=f"/attendance/request-attendance-view?id={attendance.id}",
+                        redirect=reverse("request-attendance-view")
+                        + f"?id={attendance.id}",
                         icon="chatbox-ellipses",
                     )
             return render(
@@ -2029,6 +2043,7 @@ def work_records(request):
 @hx_request_required
 def work_records_change_month(request):
     previous_data = request.GET.urlencode()
+    employee_filter_form = EmployeeFilter()
     if request.GET.get("month"):
         date_obj = request.GET.get("month")
         month = int(date_obj.split("-")[1])
@@ -2039,6 +2054,9 @@ def work_records_change_month(request):
 
     schedules = list(EmployeeShiftSchedule.objects.all())
     employees = list(Employee.objects.filter(is_active=True))
+    if request.method == "POST":
+        employee_filter_form = EmployeeFilter(request.POST)
+        employees = list(employee_filter_form.qs)
     data = []
     month_matrix = calendar.monthcalendar(year, month)
 
@@ -2092,6 +2110,7 @@ def work_records_change_month(request):
         "data": data,
         "pd": previous_data,
         "current_date": date.today(),
+        "f": employee_filter_form,
     }
     return render(
         request, "attendance/work_record/work_record_list.html", context=context

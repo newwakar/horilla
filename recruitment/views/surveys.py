@@ -9,14 +9,23 @@ from datetime import datetime
 
 from django.contrib import messages
 from django.core import serializers
+from django.core.cache import cache as CACHE
 from django.core.files.storage import default_storage
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db.models import ProtectedError
 from django.http import HttpResponse, HttpResponseRedirect
 from django.shortcuts import redirect, render
+from django.urls import reverse
 from django.utils.translation import gettext_lazy as _
 
 from base.methods import closest_numbers, get_pagination
-from horilla.decorators import hx_request_required, login_required, permission_required
+from horilla.decorators import (
+    hx_request_required,
+    is_recruitment_manager,
+    login_required,
+    manager_can_enter,
+    permission_required,
+)
 from recruitment.filters import SurveyFilter
 from recruitment.forms import (
     AddQuestionForm,
@@ -31,6 +40,7 @@ from recruitment.models import (
     Recruitment,
     RecruitmentSurvey,
     RecruitmentSurveyAnswer,
+    Resume,
     Stage,
     SurveyTemplate,
 )
@@ -53,27 +63,16 @@ def candidate_survey(request):
     Used to render survey form to the candidate
     """
     MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 MB in bytes
-    candidate_json = request.session["candidate"]
-    candidate_dict = json.loads(candidate_json)
-    rec_id = candidate_dict[0]["fields"]["recruitment_id"]
-    job_id = candidate_dict[0]["fields"]["job_position_id"]
-    job = JobPosition.objects.get(id=job_id)
-    recruitment = Recruitment.objects.get(id=rec_id)
-    stage_id = candidate_dict[0]["fields"]["stage_id"]
-    candidate_dict[0]["fields"]["recruitment_id"] = recruitment
-    candidate_dict[0]["fields"]["job_position_id"] = job
-    candidate_dict[0]["fields"]["stage_id"] = Stage.objects.get(id=stage_id)
-    candidate = Candidate(**candidate_dict[0]["fields"])
-    form = SurveyForm(recruitment=recruitment).form
+
+    candidate: Candidate = CACHE.get(
+        request.session.session_key + "application-candidate"
+    )
+    if not candidate:
+        return redirect(reverse("open-recruitments"))
+    form = SurveyForm(recruitment=candidate.recruitment_id).form
     if request.method == "POST":
-        if not Candidate.objects.filter(
-            email=candidate.email, recruitment_id=candidate.recruitment_id
-        ).exists():
+        if not candidate.pk:
             candidate.save()
-        else:
-            candidate = Candidate.objects.filter(
-                email=candidate.email, recruitment_id=candidate.recruitment_id
-            ).first()
         answer = (
             RecruitmentSurveyAnswer()
             if candidate.recruitmentsurveyanswer_set.first() is None
@@ -130,12 +129,21 @@ def candidate_survey(request):
 
 
 @login_required
-@permission_required(perm="recruitment.view_recruitmentsurvey")
+@is_recruitment_manager(perm="recruitment.view_recruitmentsurvey")
 def view_question_template(request):
     """
     This method is used to view the question template
     """
-    questions = RecruitmentSurvey.objects.all()
+    recs = Recruitment.objects.all()
+    ids = []
+    for i in recs:
+        for manager in i.recruitment_managers.all():
+            if request.user.employee_get == manager:
+                ids.append(i.id)
+    if request.user.has_perm("view_recruitmentsurvey"):
+        questions = RecruitmentSurvey.objects.all()
+    else:
+        questions = RecruitmentSurvey.objects.filter(recruitment_ids__in=ids)
     templates = group_by_queryset(
         questions.filter(template_id__isnull=False).distinct(),
         "template_id__title",
@@ -269,11 +277,27 @@ def application_form(request):
     form = ApplicationForm()
     recruitment = None
     recruitment_id = request.GET.get("recruitmentId")
+    resume_id = request.GET.get("resumeId")
+    resume_obj = Resume.objects.filter(id=resume_id).first()
+
+    if resume_obj:
+        initial_data = {"resume": resume_obj.file.url if resume_obj else None}
+        form = ApplicationForm(initial=initial_data)
+
     if recruitment_id is not None:
         recruitment = Recruitment.objects.filter(id=recruitment_id)
         if recruitment.exists():
             recruitment = recruitment.first()
     if request.POST:
+
+        if "resume" not in request.FILES and resume_id:
+            if resume_obj and resume_obj.file:
+                file_content = resume_obj.file.read()
+                pdf_file = SimpleUploadedFile(
+                    resume_obj.file.name, file_content, content_type="application/pdf"
+                )
+                request.FILES["resume"] = pdf_file
+
         form = ApplicationForm(request.POST, request.FILES)
         if form.is_valid():
             candidate_obj = form.save(commit=False)
@@ -286,30 +310,37 @@ def application_form(request):
             messages.success(request, _("Application saved."))
 
             resume = request.FILES["resume"]
-            profile = request.FILES["profile"]
 
             resume_path = f"recruitment/resume/{resume.name}"
-            profile_path = f"recruitment/profile/{profile.name}"
 
             with default_storage.open(resume_path, "wb+") as destination:
                 for chunk in resume.chunks():
                     destination.write(chunk)
 
-            with default_storage.open(profile_path, "wb+") as destination:
-                for chunk in profile.chunks():
-                    destination.write(chunk)
-
             candidate_obj.resume = resume_path
-            candidate_obj.profile = profile_path
-
-            request.session["candidate"] = serializers.serialize(
-                "json", [candidate_obj]
+            try:
+                profile = request.FILES["profile"] if request.FILES["profile"] else None
+                profile_path = f"recruitment/profile/{profile.name}"
+                with default_storage.open(profile_path, "wb+") as destination:
+                    for chunk in profile.chunks():
+                        destination.write(chunk)
+                candidate_obj.profile = profile_path
+            except:
+                pass
+            CACHE.set(
+                request.session.session_key + "application-candidate", candidate_obj
             )
             if RecruitmentSurvey.objects.filter(
                 recruitment_ids=recruitment_id
             ).exists():
-                return redirect(candidate_survey)
+                if not request.user.has_perm("perms.recruitment.add_candidate"):
+                    return redirect(candidate_survey)
             candidate_obj.save()
+
+            if resume_obj:
+                resume_obj.is_candidate = True
+                resume_obj.save()
+
             return render(request, "candidate/success.html")
         form.fields["job_position_id"].queryset = (
             form.instance.recruitment_id.open_positions.all()
@@ -317,13 +348,13 @@ def application_form(request):
     return render(
         request,
         "candidate/application_form.html",
-        {"form": form, "recruitment": recruitment},
+        {"form": form, "recruitment": recruitment, "resume": resume_obj},
     )
 
 
 @login_required
 @hx_request_required
-@permission_required(perm="recruitment.view_recruitmentsurvey")
+@is_recruitment_manager(perm="recruitment.view_recruitmentsurvey")
 def single_survey(request, survey_id):
     """
     This view method is used to single view of question template

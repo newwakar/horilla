@@ -8,10 +8,11 @@ from django.http import HttpResponse
 from django.urls import path
 
 from attendance.models import AttendanceGeneralSetting
-from base.models import Company
+from base.models import Company, TrackLateComeEarlyOut
 from base.urls import urlpatterns
 from employee.models import EmployeeGeneralSetting
 from horilla import horilla_apps
+from horilla.decorators import hx_request_required, login_required, permission_required
 from offboarding.models import OffboardingGeneralSetting
 from payroll.models.models import PayrollGeneralSetting
 from recruitment.models import RecruitmentGeneralSetting
@@ -60,6 +61,9 @@ def get_companies(request):
     return {"all_companies": companies, "company_selected": company_selected}
 
 
+@login_required
+@hx_request_required
+@permission_required("base.change_company")
 def update_selected_company(request):
     """
     This method is used to update the selected company on the session
@@ -197,3 +201,9 @@ def biometric_app_exists(request):
 
     biometric_app_exists = "biometric" in settings.INSTALLED_APPS
     return {"biometric_app_exists": biometric_app_exists}
+
+
+def enable_late_come_early_out_tracking(request):
+    tracking = TrackLateComeEarlyOut.objects.first()
+    enable = tracking.is_enable if tracking else True
+    return {"tracking": enable, "late_come_early_out_tracking": enable}

@@ -18,9 +18,9 @@ from django.db.utils import IntegrityError
 from django.forms import modelformset_factory
 from django.http import HttpResponse, HttpResponseRedirect, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
+from django.urls import reverse
 from django.utils.translation import gettext_lazy as _
 
-from attendance.methods.group_by import group_by_queryset
 from base.methods import closest_numbers, get_key_instances, get_pagination, sortby
 from base.views import paginator_qry
 from employee.models import Employee, EmployeeWorkInformation
@@ -29,8 +29,10 @@ from horilla.decorators import (
     login_required,
     manager_can_enter,
     meeting_manager_can_enter,
+    owner_can_enter,
     permission_required,
 )
+from horilla.group_by import group_by_queryset
 from notifications.signals import notify
 from pms.filters import (
     ActualKeyResultFilter,
@@ -65,6 +67,7 @@ from .forms import (
     AddAssigneesForm,
     AnonymousFeedbackForm,
     EmployeeKeyResultForm,
+    EmployeeObjectiveCreateForm,
     EmployeeObjectiveForm,
     FeedbackForm,
     KeyResultForm,
@@ -153,7 +156,9 @@ def obj_form_save(request, objective_form):
                 verb_de="Du hast ein Ziel-Key-Ergebnis erreicht!",
                 verb_es="¡Has logrado un Resultado Clave de Objetivo!",
                 verb_fr="Vous avez atteint un Résultat Clé d'Objectif !",
-                redirect=f"/pms/objective-detailed-view/{objective.id}",
+                redirect=reverse(
+                    "objective-detailed-view", kwargs={"obj_id": objective.id}
+                ),
             )
 
 
@@ -170,7 +175,6 @@ def objective_creation(request):
     """
     employee = request.user.employee_get
     objective_form = ObjectiveForm(employee=employee)
-
     if request.GET.get("key_result_id") is not None:
         objective_form = ObjectiveForm(request.GET)
 
@@ -258,7 +262,9 @@ def objective_update(request, obj_id):
                     verb_de="Du hast ein Ziel-Key-Ergebnis erreicht!",
                     verb_es="¡Has logrado un Resultado Clave de Objetivo!",
                     verb_fr="Vous avez atteint un Résultat Clé d'Objectif !",
-                    redirect=f"/pms/objective-detailed-view/{objective.id}",
+                    redirect=reverse(
+                        "objective-detailed-view", kwargs={"obj_id": objective.id}
+                    ),
                 )
             messages.success(
                 request,
@@ -327,6 +333,7 @@ def key_result_create(request):
     """
     form = KRForm()
     redirect_url = request.GET.get("data")
+    dataUrl = request.GET.get("dataUrl")
     if request.method == "POST":
         form = KRForm(request.POST)
         if form.is_valid():
@@ -343,15 +350,14 @@ def key_result_create(request):
                 key_result_ids.remove("create_new_key_result")
             key_result_ids.append(str(instance.id))
             mutable_get.setlist("key_result_id", key_result_ids)
-
-            redirect_url = f"/pms/objective-creation/?data={mutable_get.urlencode()}"
+            redirect_url = f"/pms/{dataUrl}{mutable_get.urlencode()}"
         else:
             redirect_url = request.GET.urlencode()
 
     return render(
         request,
         "okr/key_result/key_result_form.html",
-        {"k_form": form, "redirect_url": redirect_url},
+        {"k_form": form, "redirect_url": redirect_url, "dataUrl": dataUrl},
     )
 
 
@@ -450,7 +456,9 @@ def add_assignees(request, obj_id):
                     verb_de="Du hast ein Ziel-Key-Ergebnis erreicht!",
                     verb_es="¡Has logrado un Resultado Clave de Objetivo!",
                     verb_fr="Vous avez atteint un Résultat Clé d'Objectif !",
-                    redirect=f"/pms/objective-detailed-view/{objective.id}",
+                    redirect=reverse(
+                        "objective-detailed-view", kwargs={"obj_id": objective.id}
+                    ),
                 )
             objective.save()
             messages.info(
@@ -1057,6 +1065,53 @@ def view_employee_objective(request, emp_obj_id):
 @login_required
 @hx_request_required
 @manager_can_enter(perm="pms.add_employeeobjective")
+def create_employee_objective(request):
+    """
+    This function is used to create the employee objective
+        args:
+            emp_obj_id(int) : pimarykey of EmployeeObjective
+        return:
+            redirect to form of employee objective
+    """
+    form = EmployeeObjectiveCreateForm()
+    if request.GET.get("data"):
+        form = EmployeeObjectiveCreateForm(request.GET)
+    if request.method == "POST":
+        form = EmployeeObjectiveCreateForm(request.POST)
+        if form.is_valid():
+            # get key result on form
+            krs = list(form.cleaned_data["key_result_id"])
+            emp_obj = form.save(commit=False)
+            obj = emp_obj.objective_id
+            # Add this employee as assignee
+            obj.assignees.add(emp_obj.employee_id)
+            krs.extend([key_result for key_result in obj.key_result_id.all()])
+            set_krs = set(krs)
+            emp_obj.save()
+            # Add all key results
+            for kr in set_krs:
+                emp_obj.key_result_id.add(kr)
+                if not EmployeeKeyResult.objects.filter(
+                    employee_objective_id=emp_obj, key_result_id=kr
+                ).exists():
+                    emp_kr = EmployeeKeyResult.objects.create(
+                        employee_objective_id=emp_obj,
+                        key_result_id=kr,
+                        progress_type=kr.progress_type,
+                        target_value=kr.target_value,
+                    )
+                    emp_kr.save()
+            messages.success(request, _("Employee objective Updated successfully"))
+            return HttpResponse("<script>window.location.reload()</script>")
+    context = {"form": form, "k_form": KRForm(), "emp_obj": True}
+    return render(
+        request, "okr/emp_objective/emp_objective_create_form.html", context=context
+    )
+
+
+@login_required
+@hx_request_required
+@manager_can_enter(perm="pms.change_employeeobjective")
 def update_employee_objective(request, emp_obj_id):
     """
     This function is used to update the employee objective
@@ -1069,7 +1124,7 @@ def update_employee_objective(request, emp_obj_id):
     form = EmployeeObjectiveForm(instance=emp_objective)
     if request.method == "POST":
         form = EmployeeObjectiveForm(request.POST, instance=emp_objective)
-        if form.is_valid:
+        if form.is_valid():
             emp_obj = form.save(commit=False)
             emp_obj.save()
             messages.success(request, _("Employee objective Updated successfully"))
@@ -1165,7 +1220,10 @@ def change_employee_objective_status(request, emp_obj):
                 ha sido cambiado a {emp_objective.status}.",
             verb_fr=f"Le statut de l'objectif '{emp_objective.objective_id}'\
                 a été changé à {emp_objective.status}.",
-            redirect=f"/pms/objective-detailed-view/{emp_objective.objective_id.id}",
+            redirect=reverse(
+                "objective-detailed-view",
+                kwargs={"obj_id": emp_objective.objective_id.id},
+            ),
         )
     else:
         messages.info(
@@ -1365,7 +1423,7 @@ def send_feedback_notifications(request, form):
             verb_de="Sie haben Feedback erhalten!",
             verb_es="¡Has recibido retroalimentación!",
             verb_fr="Vous avez reçu des commentaires !",
-            redirect=f"/pms/feedback-detailed-view/{form.id}",
+            redirect=reverse("feedback-detailed-view", kwargs={"id": form.id}),
             icon="chatbox-ellipses",
         )
 
@@ -1380,7 +1438,7 @@ def send_feedback_notifications(request, form):
             verb_de="Sie wurden als Manager in einem Feedback zugewiesen!",
             verb_es="¡Has sido asignado como manager en un feedback!",
             verb_fr="Vous avez été désigné comme manager dans un commentaire !",
-            redirect=f"/pms/feedback-detailed-view/{form.id}",
+            redirect=reverse("feedback-detailed-view", kwargs={"id": form.id}),
             icon="chatbox-ellipses",
         )
 
@@ -1396,7 +1454,7 @@ def send_feedback_notifications(request, form):
                 verb_de="Sie wurden als Untergebener in einem Feedback zugewiesen!",
                 verb_es="¡Has sido asignado como subordinado en un feedback!",
                 verb_fr="Vous avez été désigné comme subordonné dans un commentaire !",
-                redirect=f"/pms/feedback-detailed-view/{form.id}",
+                redirect=reverse("feedback-detailed-view", kwargs={"id": form.id}),
                 icon="chatbox-ellipses",
             )
 
@@ -1412,7 +1470,7 @@ def send_feedback_notifications(request, form):
                 verb_de="Sie wurden als Kollege in einem Feedback zugewiesen!",
                 verb_es="¡Has sido asignado como colega en un feedback!",
                 verb_fr="Vous avez été désigné comme collègue dans un commentaire !",
-                redirect=f"/pms/feedback-detailed-view/{form.id}",
+                redirect=reverse("feedback-detailed-view", kwargs={"id": form.id}),
                 icon="chatbox-ellipses",
             )
 
@@ -1434,6 +1492,7 @@ def feedback_creation(request):
     if request.method == "POST":
         form = FeedbackForm(request.POST)
         if form.is_valid():
+            employees = form.data.getlist("subordinate_id")
             if key_result_ids := request.POST.getlist("employee_key_results_id"):
                 for key_result_id in key_result_ids:
                     key_result = EmployeeKeyResult.objects.filter(
@@ -1442,6 +1501,8 @@ def feedback_creation(request):
                     feedback_form = form.save()
                     feedback_form.employee_key_results_id.add(key_result)
             instance = form.save()
+            instance.subordinate_id.set(employees)
+
             messages.success(request, _("Feedback created successfully."))
             send_feedback_notifications(request, form=instance)
             return redirect(feedback_list_view)
@@ -1515,6 +1576,16 @@ def feedback_update(request, id):
     if request.method == "POST":
         form = FeedbackForm(request.POST, instance=feedback)
         if form.is_valid():
+            employees = form.data.getlist("subordinate_id")
+            if key_result_ids := request.POST.getlist("employee_key_results_id"):
+                for key_result_id in key_result_ids:
+                    key_result = EmployeeKeyResult.objects.filter(
+                        id=key_result_id
+                    ).first()
+                    feedback_form = form.save()
+                    feedback_form.employee_key_results_id.add(key_result)
+            instance = form.save()
+            instance.subordinate_id.set(employees)
             form = form.save()
             messages.info(request, _("Feedback updated successfully!."))
             send_feedback_notifications(request, form)
@@ -1701,6 +1772,7 @@ def feedback_list_view(request):
 
 
 @login_required
+@owner_can_enter("pms.view_Feedback", Feedback)
 def feedback_detailed_view(request, id, **kwargs):
     """
     This view is used to for detailed view of feedback,
@@ -2801,7 +2873,7 @@ def anonymous_feedback_add(request):
                         verb_de="Sie haben anonymes Feedback erhalten!",
                         verb_es="¡Has recibido un comentario anónimo!",
                         verb_fr="Vous avez reçu un feedback anonyme!",
-                        redirect="/pms/feedback-view/",
+                        redirect=reverse("feedback-view"),
                         icon="bag-check",
                     )
                 except:
@@ -2952,7 +3024,10 @@ def employee_keyresult_creation(request, emp_obj_id):
                 verb_de="Du hast ein Schlüsselergebnis erreicht!",
                 verb_es="¡Has conseguido un Resultado Clave!",
                 verb_fr="Vous avez obtenu un Résultat Clé!",
-                redirect=f"/pms/objective-detailed-view/{emp_objective.objective_id.id}",
+                redirect=reverse(
+                    "objective-detailed-view",
+                    kwargs={"obj_id": emp_objective.objective_id.id},
+                ),
             )
             return HttpResponse("<script>window.location.reload()</script>")
     context = {
@@ -2997,7 +3072,10 @@ def employee_keyresult_update(request, kr_id):
                 verb_de="Ihr Schlüsselergebnis wurde aktualisiert.",
                 verb_es="Se ha actualizado su Resultado Clave.",
                 verb_fr="Votre Résultat Clé a été mis à jour.",
-                redirect=f"/pms/objective-detailed-view/{emp_kr.employee_objective_id.objective_id.id}",
+                redirect=reverse(
+                    "objective-detailed-view",
+                    kwargs={"obj_id": emp_kr.employee_objective_id.objective_id.id},
+                ),
             )
             return HttpResponse("<script>window.location.reload()</script>")
 
@@ -3102,7 +3180,6 @@ def view_meetings(request):
 
 @login_required
 @hx_request_required
-@permission_required("pms.add_meetings")
 def create_meetings(request):
     """
     This view is used to create the meeting ,
@@ -3148,7 +3225,7 @@ def create_meetings(request):
                     verb_es=f"Se le ha agregado como empleado responsable de la reunión {instance.title}",
                     verb_fr=f"Vous avez été ajouté en tant que employé responsable pour la réunion {instance.title}",
                     icon="information",
-                    redirect=f"/pms/view-meetings?search={instance.title}",
+                    redirect=reverse("view-meetings") + f"?search={instance.title}",
                 )
             except Exception as error:
                 pass
@@ -3163,7 +3240,7 @@ def create_meetings(request):
                     verb_es=f"Te han agregado a la reunión {instance.title}",
                     verb_fr=f"Vous avez été ajouté à la réunion {instance.title}",
                     icon="information",
-                    redirect=f"/pms/view-meetings?search={instance.title}",
+                    redirect=reverse("view-meetings") + f"?search={instance.title}",
                 )
             except Exception as error:
                 pass
@@ -3178,7 +3255,7 @@ def create_meetings(request):
                     verb_es=f"Se le ha agregado como administrador de la reunión {instance.title}",
                     verb_fr=f"Vous avez été ajouté en tant que responsable de réunion {instance.title}",
                     icon="information",
-                    redirect=f"/pms/view-meetings?search={instance.title}",
+                    redirect=reverse("view-meetings") + f"?search={instance.title}",
                 )
             except Exception as error:
                 pass

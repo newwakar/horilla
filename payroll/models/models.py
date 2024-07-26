@@ -18,7 +18,6 @@ from django.utils.translation import gettext_lazy as _
 
 from asset.models import Asset
 from attendance.models import Attendance, strtime_seconds, validate_time_format
-from base import thread_local_middleware
 from base.horilla_company_manager import HorillaCompanyManager
 from base.models import (
     Company,
@@ -29,6 +28,7 @@ from base.models import (
     WorkType,
 )
 from employee.models import BonusPoint, Employee, EmployeeWorkInformation
+from horilla import horilla_middlewares
 from horilla.models import HorillaModel
 from horilla_audit.models import HorillaAuditInfo, HorillaAuditLog
 from leave.models import LeaveRequest, LeaveType
@@ -639,6 +639,7 @@ IF_CONDITION_CHOICE = [
     ("gt", _("Greater Than (>)")),
     ("le", _("Less Than or Equal To (<=)")),
     ("ge", _("Greater Than or Equal To (>=)")),
+    ("range", _("Range")),
 ]
 FIELD_CHOICE = [
     ("children", _("Children")),
@@ -689,6 +690,7 @@ class Allowance(HorillaModel):
         ("shift_id", _("Shift")),
         ("overtime", _("Overtime")),
         ("work_type_id", _("Work Type")),
+        ("children", _("Children")),
     ]
 
     if_condition_choice = [
@@ -792,6 +794,14 @@ class Allowance(HorillaModel):
         validators=[min_zero],
         help_text=_("The attendance fixed amount for one validated attendance"),
     )
+    # If based on children
+    per_children_fixed_amount = models.FloatField(
+        null=True,
+        blank=True,
+        default=0.00,
+        validators=[min_zero],
+        help_text=_("The fixed amount per children"),
+    )
     # If based on shift
     shift_id = models.ForeignKey(
         EmployeeShift,
@@ -872,6 +882,12 @@ class Allowance(HorillaModel):
     )
     if_amount = models.FloatField(
         default=0.00, help_text=_("The amount of the pay-head")
+    )
+    start_range = models.FloatField(
+        blank=True, null=True, help_text=_("The start amount of the pay-head range")
+    )
+    end_range = models.FloatField(
+        blank=True, null=True, help_text=_("The end amount of the pay-head range")
     )
     company_id = models.ForeignKey(
         Company, null=True, editable=False, on_delete=models.PROTECT
@@ -966,7 +982,8 @@ class Allowance(HorillaModel):
             raise ValidationError(
                 _("If based on is work type, then work type must be filled.")
             )
-
+        if self.based_on == "children" and not self.per_children_fixed_amount:
+            raise ValidationError(_("The amount per children must be filled."))
         if self.is_fixed and self.amount < 0:
             raise ValidationError({"amount": _("Amount should be greater than zero.")})
 
@@ -987,16 +1004,6 @@ class Allowance(HorillaModel):
 
     def __str__(self) -> str:
         return str(self.title)
-
-    def save(self):
-        super().save()
-        if (
-            not self.include_active_employees
-            and not self.specific_employees.first()
-            and not self.is_condition_based
-        ):
-            self.include_active_employees = True
-            super().save()
 
 
 class Deduction(HorillaModel):
@@ -1181,6 +1188,12 @@ class Deduction(HorillaModel):
     if_amount = models.FloatField(
         default=0.00, help_text=_("The amount of the pay-head")
     )
+    start_range = models.FloatField(
+        blank=True, null=True, help_text=_("The start amount of the pay-head range")
+    )
+    end_range = models.FloatField(
+        blank=True, null=True, help_text=_("The end amount of the pay-head range")
+    )
     company_id = models.ForeignKey(
         Company, null=True, editable=False, on_delete=models.PROTECT
     )
@@ -1270,16 +1283,6 @@ class Deduction(HorillaModel):
 
     def __str__(self) -> str:
         return str(self.title)
-
-    def save(self):
-        super().save()
-        if (
-            not self.include_active_employees
-            and not self.specific_employees.first()
-            and not self.is_condition_based
-        ):
-            self.include_active_employees = True
-            super().save()
 
 
 class Payslip(HorillaModel):
@@ -1433,7 +1436,7 @@ class LoanAccount(HorillaModel):
     installment_start_date = models.DateField(
         help_text="From the start date deduction will apply"
     )
-    apply_on = models.CharField(default="end_of_month", max_length=10, editable=False)
+    apply_on = models.CharField(default="end_of_month", max_length=20, editable=False)
     settled = models.BooleanField(default=False)
     asset_id = models.ForeignKey(
         Asset, on_delete=models.PROTECT, null=True, editable=False
@@ -1625,7 +1628,7 @@ class Reimbursement(HorillaModel):
         ordering = ["-id"]
 
     def save(self, *args, **kwargs) -> None:
-        request = getattr(thread_local_middleware._thread_locals, "request", None)
+        request = getattr(horilla_middlewares._thread_locals, "request", None)
         amount_for_leave = (
             EncashmentGeneralSettings.objects.first().leave_amount
             if EncashmentGeneralSettings.objects.first()
@@ -1665,7 +1668,7 @@ class Reimbursement(HorillaModel):
                         bonus_points.save()
                     else:
                         request = getattr(
-                            thread_local_middleware._thread_locals, "request", None
+                            horilla_middlewares._thread_locals, "request", None
                         )
                         if request:
                             messages.info(
@@ -1691,7 +1694,7 @@ class Reimbursement(HorillaModel):
                             assigned_leave.save()
                         else:
                             request = getattr(
-                                thread_local_middleware._thread_locals, "request", None
+                                horilla_middlewares._thread_locals, "request", None
                             )
                             if request:
                                 messages.info(
@@ -1734,7 +1737,7 @@ class Reimbursement(HorillaModel):
                     self.allowance_id.delete()
 
     def delete(self, *args, **kwargs):
-        request = getattr(thread_local_middleware._thread_locals, "request", None)
+        request = getattr(horilla_middlewares._thread_locals, "request", None)
         if self.status == "approved":
             message = messages.info(
                 request,
@@ -1808,3 +1811,89 @@ class EncashmentGeneralSettings(models.Model):
     bonus_amount = models.IntegerField(default=1)
     leave_amount = models.IntegerField(blank=True, null=True, verbose_name="Amount")
     objects = models.Manager()
+
+
+DAYS = [
+    ("last day", _("Last Day")),
+    ("1", "1st"),
+    ("2", "2nd"),
+    ("3", "3rd"),
+    ("4", "4th"),
+    ("5", "5th"),
+    ("6", "6th"),
+    ("7", "7th"),
+    ("8", "8th"),
+    ("9", "9th"),
+    ("10", "10th"),
+    ("11", "11th"),
+    ("12", "12th"),
+    ("13", "13th"),
+    ("14", "14th"),
+    ("15", "15th"),
+    ("16", "16th"),
+    ("17", "17th"),
+    ("18", "18th"),
+    ("19", "19th"),
+    ("20", "20th"),
+    ("21", "21th"),
+    ("22", "22th"),
+    ("23", "23th"),
+    ("24", "24th"),
+    ("25", "25th"),
+    ("26", "26th"),
+    ("27", "27th"),
+    ("28", "28th"),
+    ("29", "29th"),
+    ("30", "30th"),
+    ("31", "31th"),
+]
+
+
+class PayslipAutoGenerate(models.Model):
+    """
+    Model for generating payslip automatically
+    """
+
+    generate_day = models.CharField(
+        max_length=30,
+        choices=DAYS,
+        default=("1"),
+        verbose_name="Payslip Generate Day",
+        help_text="On this day of every month,Payslip will auto generate",
+    )
+    auto_generate = models.BooleanField(default=False)
+    company_id = models.OneToOneField(
+        Company, on_delete=models.CASCADE, null=True, blank=True
+    )
+
+    def clean(self):
+        # Unique condition checking for all company
+        if (
+            not self.company_id
+            and PayslipAutoGenerate.objects.filter(company_id=None).exists()
+        ):
+            if not self.id:
+                raise ValidationError(
+                    {
+                        "company_id": "Auto payslip generation for all company is already exists"
+                    }
+                )
+            all_company_auto_payslip = PayslipAutoGenerate.objects.filter(
+                company_id=None
+            ).first()
+            if all_company_auto_payslip.id != self.id:
+                raise ValidationError(
+                    {
+                        "company_id": "Auto payslip generation for all company is already exists"
+                    }
+                )
+
+    def save(self, *args, **kwargs):
+        from payroll.scheduler import auto_payslip_generate
+
+        if self.auto_generate:
+            auto_payslip_generate()
+        super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        return f"{self.generate_day} | {self.company_id} "

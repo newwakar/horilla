@@ -52,7 +52,12 @@ SUBMENUS = [
     },
     {
         "menu": trans("Company Leaves"),
-        "redirect": reverse("holiday-view"),
+        "redirect": reverse("company-leave-view"),
+        "accessibility": "leave.sidebar.company_leave_accessibility",
+    },
+    {
+        "menu": trans("Restrict Leaves"),
+        "redirect": reverse("restrict-view"),
         "accessibility": "leave.sidebar.company_leave_accessibility",
     },
 ]

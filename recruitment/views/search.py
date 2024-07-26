@@ -11,10 +11,15 @@ from django.contrib.auth.models import User
 from django.core.paginator import Paginator
 from django.shortcuts import render
 
-from attendance.methods.group_by import group_by_queryset
-from attendance.methods.group_by import group_by_queryset as general_group_by
 from base.methods import get_key_instances, get_pagination, sortby
-from horilla.decorators import hx_request_required, login_required, permission_required
+from horilla.decorators import (
+    hx_request_required,
+    is_recruitment_manager,
+    login_required,
+    permission_required,
+)
+from horilla.group_by import group_by_queryset
+from horilla.group_by import group_by_queryset as general_group_by
 from recruitment.filters import (
     CandidateFilter,
     RecruitmentFilter,
@@ -119,6 +124,11 @@ def candidate_search(request):
             candidates, field, request.GET.get("page"), "page"
         )
         template = "candidate/group_by.html"
+    else:
+        # Store the Candidates in the session
+        request.session["filtered_candidates"] = [
+            candidate.id for candidate in candidates
+        ]
 
     candidates = paginator_qry(candidates, request.GET.get("page"))
 
@@ -139,18 +149,6 @@ def candidate_search(request):
             "emp_list": existing_emails,
         },
     )
-
-
-@login_required
-@permission_required(perm="recruitment.view_candidate")
-def pipeline_candidate_search(request):
-    """
-    This method is used to search  candidate
-    """
-    template = "pipeline/pipeline_components/kanban_tabs.html"
-    if request.GET.get("view") == "card":
-        template = "pipeline/pipeline_components/kanban_tabs.html"
-    return render(request, template)
 
 
 @login_required
@@ -179,13 +177,25 @@ def candidate_filter_view(request):
 
 @login_required
 @hx_request_required
-@permission_required(perm="recruitment.view_recruitmentsurvey")
+@is_recruitment_manager(perm="recruitment.view_recruitmentsurvey")
 def filter_survey(request):
     """
     This method is used to filter/search the recruitment surveys
     """
+
+    recs = Recruitment.objects.all()
+    ids = []
+    for i in recs:
+        for manager in i.recruitment_managers.all():
+            if request.user.employee_get == manager:
+                ids.append(i.id)
+    if request.user.has_perm("view_recruitmentsurvey"):
+        questions = RecruitmentSurvey.objects.all()
+    else:
+        questions = RecruitmentSurvey.objects.filter(recruitment_ids__in=ids)
+
     previous_data = request.GET.urlencode()
-    filter_obj = SurveyFilter(request.GET)
+    filter_obj = SurveyFilter(request.GET, questions)
     questions = filter_obj.qs
     templates = group_by_queryset(
         questions.filter(template_id__isnull=False).distinct(),

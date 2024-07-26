@@ -22,6 +22,7 @@ from base.models import Company, DynamicPagination
 from employee.models import Employee, EmployeeWorkInformation
 from horilla.decorators import login_required
 from leave.models import LeaveRequest, LeaveRequestConditionApproval
+from recruitment.models import Candidate
 
 
 def filtersubordinates(request, queryset, perm=None, field=None):
@@ -560,7 +561,8 @@ def export_data(request, model, form_class, filter_class, file_name):
                     for format_name, format_string in date_formats.items():
                         if format_name == date_format:
                             value = start_date.strftime(format_string)
-
+                if isinstance(value, datetime):
+                    value = str(value)
                 data_export[verbose_name].append(value)
 
     data_frame = pd.DataFrame(data=data_export)
@@ -587,6 +589,8 @@ def reload_queryset(fields):
     for k, v in fields.items():
         if isinstance(v, ModelChoiceField):
             if v.queryset.model == Employee:
+                v.queryset = v.queryset.model.objects.filter(is_active=True)
+            elif v.queryset.model == Candidate:
                 v.queryset = v.queryset.model.objects.filter(is_active=True)
             else:
                 v.queryset = v.queryset.model.objects.all()
@@ -616,7 +620,8 @@ def link_callback(uri, rel):
     Convert HTML URIs to absolute system paths so xhtml2pdf can access those
     resources
     """
-
+    if not uri.startswith("/static"):
+        return uri
     uri = "payroll/fonts/Poppins_Regular.ttf"
     result = finders.find(uri)
     if result:
@@ -645,7 +650,7 @@ def link_callback(uri, rel):
     return path
 
 
-def generate_pdf(template_path, context, path=True, title=None):
+def generate_pdf(template_path, context, path=True, title=None, html=True):
     template_path = template_path
     context_data = context
     title = (
@@ -657,8 +662,11 @@ def generate_pdf(template_path, context, path=True, title=None):
     response = HttpResponse(content_type="application/pdf")
     response["Content-Disposition"] = f"attachment; filename={title}"
 
-    template = get_template(template_path)
-    html = template.render(context_data)
+    if html:
+        html = template_path
+    else:
+        template = get_template(template_path)
+        html = template.render(context_data)
 
     pisa_status = pisa.CreatePDF(
         html.encode("utf-8"),
@@ -693,7 +701,7 @@ def filter_conditional_leave_request(request):
 
 
 def get_pagination():
-    from base.thread_local_middleware import _thread_locals
+    from horilla.horilla_middlewares import _thread_locals
 
     request = getattr(_thread_locals, "request", None)
     user = request.user

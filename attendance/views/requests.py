@@ -6,13 +6,14 @@ This module is used to register the endpoints to the attendance requests
 
 import copy
 import json
-from datetime import date, datetime
+from datetime import date, datetime, time
 from urllib.parse import parse_qs
 
 from django.contrib import messages
 from django.http import HttpResponse, HttpResponseRedirect, JsonResponse
 from django.shortcuts import render
 from django.template.loader import render_to_string
+from django.urls import reverse
 from django.utils.translation import gettext_lazy as _
 
 from attendance.filters import AttendanceFilters, AttendanceRequestReGroup
@@ -275,7 +276,8 @@ def attendance_request_changes(request, attendance_id):
                           {user_last_name} el {attendance.attendance_date}",
                     verb_fr=f"La demande de mise à jour de présence de {employee.employee_first_name}\
                           {user_last_name} pour le {attendance.attendance_date} a été créée",
-                    redirect=f"/attendance/request-attendance-view?id={attendance.id}",
+                    redirect=reverse("request-attendance-view")
+                    + f"?id={attendance.id}",
                     icon="checkmark-circle-outline",
                 )
             return HttpResponse(
@@ -403,7 +405,9 @@ def approve_validate_attendance_request(request, attendance_id):
             attendance, start_time=start_time_sec, end_time=end_time_sec, shift=shift
         )
     if attendance.attendance_clock_out:
-        early_out(attendance, start_time=start_time_sec, end_time=end_time_sec)
+        early_out(
+            attendance, start_time=start_time_sec, end_time=end_time_sec, shift=shift
+        )
 
     messages.success(request, _("Attendance request has been approved"))
     employee = attendance.employee_id
@@ -420,7 +424,7 @@ def approve_validate_attendance_request(request, attendance_id):
             para la fecha {attendance.attendance_date}",
         verb_fr=f"Votre demande de présence pour la date \
             {attendance.attendance_date} est validée",
-        redirect=f"/attendance/request-attendance-view?id={attendance.id}",
+        redirect=reverse("request-attendance-view") + f"?id={attendance.id}",
         icon="checkmark-circle-outline",
     )
     if attendance.employee_id.employee_work_info.reporting_manager_id:
@@ -441,7 +445,7 @@ def approve_validate_attendance_request(request, attendance_id):
                 {employee.employee_first_name} {user_last_name} para el {attendance.attendance_date}",
             verb_fr=f"La demande de présence de {employee.employee_first_name} \
                 {user_last_name} pour le {attendance.attendance_date} a été validée",
-            redirect=f"/attendance/request-attendance-view?id={attendance.id}",
+            redirect=reverse("request-attendance-view") + f"?id={attendance.id}",
             icon="checkmark-circle-outline",
         )
     return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
@@ -600,7 +604,12 @@ def bulk_approve_attendance_request(request):
                 shift=shift,
             )
         if attendance.attendance_clock_out:
-            early_out(attendance, start_time=start_time_sec, end_time=end_time_sec)
+            early_out(
+                attendance,
+                start_time=start_time_sec,
+                end_time=end_time_sec,
+                shift=shift,
+            )
 
         messages.success(request, _("Attendance request has been approved"))
         employee = attendance.employee_id
@@ -617,7 +626,7 @@ def bulk_approve_attendance_request(request):
                 para la fecha {attendance.attendance_date}",
             verb_fr=f"Votre demande de présence pour la date \
                 {attendance.attendance_date} est validée",
-            redirect=f"/attendance/request-attendance-view?id={attendance.id}",
+            redirect=reverse("request-attendance-view") + f"?id={attendance.id}",
             icon="checkmark-circle-outline",
         )
         if attendance.employee_id.employee_work_info.reporting_manager_id:
@@ -638,7 +647,7 @@ def bulk_approve_attendance_request(request):
                     {employee.employee_first_name} {user_last_name} para el {attendance.attendance_date}",
                 verb_fr=f"La demande de présence de {employee.employee_first_name} \
                     {user_last_name} pour le {attendance.attendance_date} a été validée",
-                redirect=f"/attendance/request-attendance-view?id={attendance.id}",
+                redirect=reverse("request-attendance-view") + f"?id={attendance.id}",
                 icon="checkmark-circle-outline",
             )
     return HttpResponse("success")

@@ -16,11 +16,11 @@ from django.contrib import messages
 from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.http import HttpResponse, HttpResponseRedirect, JsonResponse, QueryDict
 from django.shortcuts import redirect, render
+from django.urls import reverse
 from django.utils.translation import gettext_lazy as _
 
 import payroll.models.models
 from asset.models import Asset
-from attendance.methods.group_by import group_by_queryset
 from base.backends import ConfiguredEmailBackend
 from base.methods import closest_numbers, filter_own_records, get_key_instances, sortby
 from base.models import Company
@@ -31,6 +31,7 @@ from horilla.decorators import (
     owner_can_enter,
     permission_required,
 )
+from horilla.group_by import group_by_queryset
 from leave.models import AvailableLeave
 from notifications.signals import notify
 from payroll.filters import (
@@ -609,7 +610,9 @@ def generate_payslip(request):
                     verb_de="Gehaltsabrechnung wurde für Sie erstellt.",
                     verb_es="Se ha generado la nómina para usted.",
                     verb_fr="La fiche de paie a été générée pour vous.",
-                    redirect=f"/payroll/view-payslip/{instance.id}",
+                    redirect=reverse(
+                        "view-created-payslip", kwargs={"payslip_id": instance.id}
+                    ),
                     icon="close",
                 )
             messages.success(request, f"{employees.count()} payslip saved as draft")
@@ -687,7 +690,9 @@ def create_payslip(request, new_post_data=None):
                     verb_de="Gehaltsabrechnung wurde für Sie erstellt.",
                     verb_es="Se ha generado la nómina para usted.",
                     verb_fr="La fiche de paie a été générée pour vous.",
-                    redirect=f"/payroll/view-payslip/{payslip.pk}",
+                    redirect=reverse(
+                        "view-created-payslip", kwargs={"payslip_id": payslip.pk}
+                    ),
                     icon="close",
                 )
                 return render(
@@ -719,13 +724,34 @@ def validate_start_date(request):
         contract = payroll.models.models.Contract.objects.filter(
             employee_id__id=emp_id, contract_status="active"
         ).first()
-
-        if start_datetime is not None and start_datetime < contract.contract_start_date:
-            error_message = f"<ul class='errorlist'><li>The {contract.employee_id}'s \
-                contract start date is smaller than pay period start date</li></ul>"
-            response["message"] = error_message
-            response["valid"] = False
-
+        if contract:
+            if contract.contract_end_date:
+                if not (
+                    contract.contract_start_date
+                    <= end_datetime
+                    <= contract.contract_end_date
+                ):
+                    error_message = (
+                        f"<ul class='errorlist'><li>The {contract.employee_id}'s "
+                        f"contract period is not within the payslip range</li></ul>"
+                    )
+                    response["message"] = error_message
+                    response["valid"] = False
+                elif start_datetime < contract.contract_start_date:
+                    start_datetime = contract.contract_start_date
+                    start_date = contract.contract_start_date
+            else:
+                if end_datetime < contract.contract_start_date:
+                    error_message = (
+                        f"<ul class='errorlist'><li>The payslip end date is less than {contract.employee_id}'s "
+                        f"contract start date ({contract.contract_start_date}).</li></ul>"
+                    )
+                    response["message"] = error_message
+                    response["valid"] = False
+                elif start_datetime <= contract.contract_start_date:
+                    if contract.contract_start_date <= end_datetime:
+                        start_datetime = contract.contract_start_date
+                        start_date = contract.contract_start_date
     if (
         start_datetime is not None
         and end_datetime is not None
@@ -795,6 +821,14 @@ def view_payslip(request):
             "filter_dict": data_dict,
             "gp_fields": PayslipReGroup.fields,
         },
+    )
+
+
+def payslip_create_form_initialize(request):
+    return render(
+        request,
+        "payroll/payslip/create_payslip.html",
+        {"individual_form": forms.PayslipForm()},
     )
 
 
@@ -959,7 +993,6 @@ def hx_create_allowance(request):
 
 
 @login_required
-@hx_request_required
 @permission_required("payroll.add_payslip")
 def send_slip(request):
     """
@@ -970,10 +1003,13 @@ def send_slip(request):
     payslip_ids = request.GET.getlist("id")
     payslips = Payslip.objects.filter(id__in=payslip_ids)
     if not getattr(
-        email_backend, "dynamic_username_with_display_name", None
-    ) or not len(email_backend.dynamic_username_with_display_name):
+        email_backend, "dynamic_from_email_with_display_name", None
+    ) or not len(email_backend.dynamic_from_email_with_display_name):
         messages.error(request, "Email server is not configured")
-        return redirect(f"view-payslip/{payslips[0].id}/" if view else filter_payslip)
+        if view:
+            return HttpResponse("<script>window.location.reload()</script>")
+        else:
+            return redirect(filter_payslip)
 
     result_dict = defaultdict(
         lambda: {"employee_id": None, "instances": [], "count": 0}
@@ -986,7 +1022,10 @@ def send_slip(request):
     mail_thread = MailSendThread(request, result_dict=result_dict, ids=payslip_ids)
     mail_thread.start()
     messages.info(request, "Mail processing")
-    return redirect(f"view-payslip/{payslips[0].id}/" if view else filter_payslip)
+    if view:
+        return HttpResponse("<script>window.location.reload()</script>")
+    else:
+        return redirect(filter_payslip)
 
 
 @login_required
@@ -1262,6 +1301,7 @@ def asset_fine(request):
             instance.asset_id = asset
             instance.save()
             messages.success(request, "Asset fine added")
+            return HttpResponse("<script>window.location.reload()</script>")
     return render(
         request,
         "payroll/asset_fine/form.html",
@@ -1444,7 +1484,7 @@ def approve_reimbursements(request):
                 verb_de="Ihr Erstattungsantrag wurde abgelehnt.",
                 verb_es="Su solicitud de reembolso ha sido rechazada.",
                 verb_fr="Votre demande de remboursement a été rejetée.",
-                redirect=f"/payroll/view-reimbursement?id={reimbursement.id}",
+                redirect=reverse("view-reimbursement") + f"?id={reimbursement.id}",
                 icon="checkmark",
             )
         else:
@@ -1456,7 +1496,7 @@ def approve_reimbursements(request):
                 verb_de="Ihr Rückerstattungsantrag wurde genehmigt.",
                 verb_es="Se ha aprobado tu solicitud de reembolso.",
                 verb_fr="Votre demande de remboursement a été approuvée.",
-                redirect=f"/payroll/view-reimbursement?id={reimbursement.id}",
+                redirect=reverse("view-reimbursement") + f"?id={reimbursement.id}",
                 icon="checkmark",
             )
     return redirect(view_reimbursement)
@@ -1472,8 +1512,8 @@ def delete_reimbursements(request):
     reimbursements = Reimbursement.objects.filter(id__in=ids)
     for reimbursement in reimbursements:
         user = reimbursement.employee_id.employee_user_id
-        reimbursement.delete()
-    # messages.success(request, "Reimbursements deleted")
+    reimbursements.delete()
+    messages.success(request, "Reimbursements deleted")
     notify.send(
         request.user.employee_get,
         recipient=user,

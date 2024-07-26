@@ -25,6 +25,7 @@ from base.models import Company, EmployeeShift, EmployeeShiftDay, WorkType
 from employee.models import Employee
 from horilla.models import HorillaModel
 from horilla_audit.models import HorillaAuditInfo, HorillaAuditLog
+from leave.methods import is_company_leave, is_holiday
 from leave.models import (
     WEEK_DAYS,
     WEEKS,
@@ -57,6 +58,15 @@ def format_time(seconds):
     minutes = int((seconds % 3600) // 60)
     seconds = int((seconds % 3600) % 60)
     return f"{hour:02d}:{minutes:02d}"
+
+
+def validate_hh_mm_ss_format(value):
+    timeformat = "%H:%M:%S"
+    try:
+        validtime = datetime.strptime(value, timeformat)
+        return validtime.time()  # Return the time object if needed
+    except ValueError as e:
+        raise ValidationError(_("Invalid format, it should be HH:MM:SS format"))
 
 
 def validate_time_format(value):
@@ -253,6 +263,7 @@ class Attendance(HorillaModel):
     is_validate_request = models.BooleanField(
         default=False, verbose_name=_("Is validate request")
     )
+    is_bulk_request = models.BooleanField(default=False, editable=False)
     is_validate_request_approved = models.BooleanField(
         default=False, verbose_name=_("Is validate request approved")
     )
@@ -260,6 +271,7 @@ class Attendance(HorillaModel):
     request_type = models.CharField(
         max_length=18, null=True, choices=status, default="update_request"
     )
+    is_holiday = models.BooleanField(default=False)
     requested_data = models.JSONField(null=True, editable=False)
     objects = HorillaCompanyManager(
         related_company_field="employee_id__employee_work_info__company_id"
@@ -382,34 +394,14 @@ class Attendance(HorillaModel):
                 current_date += timedelta(days=1)
 
         # Checking attendance date is in holiday list, if found making the minimum hour to 00:00
-        for leave in leaves:
-            if str(leave) == str(self.attendance_date):
-                self.minimum_hour = "00:00"
-                break
+        if is_holiday(self.attendance_date):
+            self.minimum_hour = "00:00"
+            self.is_holiday = True
 
-        # Making a dictonary contains week day value and leave day pairs
-        company_leaves = {}
-        company_leave = CompanyLeave.objects.all()
-        for com_leave in company_leave:
-            a = dict(WEEK_DAYS).get(com_leave.based_on_week_day)
-            b = com_leave.based_on_week
-            company_leaves[b] = a
-
-        # Checking the attendance date is in which week
-        week_in_month = str(((self.attendance_date.day - 1) // 7 + 1) - 1)
-
-        # Checking the attendance date is in the company leave or not
-        for pairs in company_leaves.items():
-            # For all weeks based_on_week is None
-            if str(pairs[0]) == "None":
-                if str(pairs[1]) == str(self.attendance_day):
-                    self.minimum_hour = "00:00"
-                    break
-            # Checking with based_on_week and attendance_date week
-            if str(pairs[0]) == week_in_month:
-                if str(pairs[1]) == str(self.attendance_day):
-                    self.minimum_hour = "00:00"
-                    break
+        # Checking attendance date is in company leave list, if found making the minimum hour to 00:00
+        if is_company_leave(self.attendance_date):
+            self.minimum_hour = "00:00"
+            self.is_holiday = True
 
         condition = AttendanceValidationCondition.objects.first()
         if self.is_validate_request:
@@ -973,18 +965,25 @@ class GraceTime(HorillaModel):
     """
 
     allowed_time = models.CharField(
-        default="00:00",
-        validators=[validate_time_in_minutes],
+        default="00:00:00",
+        validators=[validate_hh_mm_ss_format],
         max_length=10,
         verbose_name=_("Allowed time"),
     )
     allowed_time_in_secs = models.IntegerField()
+    allowed_clock_in = models.BooleanField(
+        default=True, help_text=_("Allcocate this grace time for Check-In Attendance")
+    )
+    allowed_clock_out = models.BooleanField(
+        default=False, help_text=_("Allcocate this grace time for Check-Out Attendance")
+    )
     is_default = models.BooleanField(default=False)
+
     company_id = models.ManyToManyField(Company, blank=True, verbose_name=_("Company"))
     objects = HorillaCompanyManager()
 
     def __str__(self) -> str:
-        return str(f"{self.allowed_time} - Minutes")
+        return str(f"{self.allowed_time} - Hours")
 
     def clean(self):
         """
@@ -1008,18 +1007,27 @@ class GraceTime(HorillaModel):
             .exists()
         ):
             raise ValidationError(
-                _("There is already a grace time with this allowed time that exists.")
+                {
+                    "allowed_time": _(
+                        "There is already an existing grace time with this allowed time."
+                    )
+                }
             )
 
     def save(self, *args, **kwargs):
         allowed_time = self.allowed_time
-        minute, secs = allowed_time.split(":")
-        minute_int = int(minute)
+        hours, minutes, secs = allowed_time.split(":")
+
+        hours_int = int(hours)
+        minutes_int = int(minutes)
         secs_int = int(secs)
-        minute_str = f"{minute_int:02d}"
+
+        hours_str = f"{hours_int:02d}"
+        minutes_str = f"{minutes_int:02d}"
         secs_str = f"{secs_int:02d}"
-        self.allowed_time = f"{minute_str}:{secs_str}"
-        self.allowed_time_in_secs = minute_int * 60 + secs_int
+
+        self.allowed_time = f"{hours_str}:{minutes_str}:{secs_str}"
+        self.allowed_time_in_secs = hours_int * 3600 + minutes_int * 60 + secs_int
         super().save(*args, **kwargs)
 
 

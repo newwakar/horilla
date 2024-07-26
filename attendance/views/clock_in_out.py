@@ -25,10 +25,13 @@ from attendance.views.views import (
     shift_schedule_today,
     strtime_seconds,
 )
-from base.context_processors import timerunner_enabled
-from base.models import EmployeeShiftDay
-from base.thread_local_middleware import _thread_locals
+from base.context_processors import (
+    enable_late_come_early_out_tracking,
+    timerunner_enabled,
+)
+from base.models import AttendanceAllowedIP, EmployeeShiftDay
 from horilla.decorators import hx_request_required, login_required
+from horilla.horilla_middlewares import _thread_locals
 
 
 def late_come_create(attendance):
@@ -63,6 +66,8 @@ def late_come(attendance, start_time, end_time, shift):
         end_time : attendance day shift end time
 
     """
+    if not enable_late_come_early_out_tracking(None).get("tracking"):
+        return
     request = getattr(_thread_locals, "request", None)
     now_sec = strtime_seconds(attendance.attendance_clock_in.strftime("%H:%M"))
     mid_day_sec = strtime_seconds("12:00")
@@ -70,7 +75,10 @@ def late_come(attendance, start_time, end_time, shift):
     # Checking gracetime allowance before creating late come
     if shift.grace_time_id:
         # checking grace time in shift, it has the higher priority
-        if shift.grace_time_id.is_active == True:
+        if (
+            shift.grace_time_id.is_active == True
+            and shift.grace_time_id.allowed_clock_in == True
+        ):
             # Setting allowance for the check in time
             now_sec -= shift.grace_time_id.allowed_time_in_secs
     # checking default grace time
@@ -79,8 +87,9 @@ def late_come(attendance, start_time, end_time, shift):
             is_default=True,
             is_active=True,
         ).first()
-        # Setting allowance for the check in time
-        now_sec -= grace_time.allowed_time_in_secs
+        # Setting allowance for the check in time if grace allocate for clock in event
+        if grace_time.allowed_clock_in:
+            now_sec -= grace_time.allowed_time_in_secs
     else:
         pass
     if start_time > end_time and start_time != end_time:
@@ -184,6 +193,24 @@ def clock_in(request):
     """
     This method is used to mark the attendance once per a day and multiple attendance activities.
     """
+    allowed_attendance_ips = AttendanceAllowedIP.objects.first()
+
+    # 'not request.__dict__.get("datetime")' used to check if the request is from biometric device
+
+    if (
+        not request.__dict__.get("datetime")
+        and allowed_attendance_ips
+        and allowed_attendance_ips.is_enabled
+    ):
+
+        x_forwarded_for = request.META.get("HTTP_X_FORWARDED_FOR")
+        ip = request.META.get("REMOTE_ADDR")
+        if x_forwarded_for:
+            ip = x_forwarded_for.split(",")[0]
+
+        if not (ip in allowed_attendance_ips.additional_data["allowed_ips"]):
+            return HttpResponse(_("You cannot mark attendance from this network"))
+
     employee, work_info = employee_exists(request)
     datetime_now = datetime.now()
     if request.__dict__.get("datetime"):
@@ -295,15 +322,19 @@ def clock_out_attendance_and_activity(employee, date_today, now, out_datetime=No
     """
 
     attendance_activities = AttendanceActivity.objects.filter(
-        employee_id=employee
+        employee_id=employee,
     ).order_by("attendance_date", "id")
-    if attendance_activities.exists():
-        attendance_activity = attendance_activities.last()
+
+    if attendance_activities.filter(clock_out__isnull=True).exists():
+        attendance_activity = attendance_activities.filter(
+            clock_out__isnull=True
+        ).last()
         attendance_activity.clock_out = out_datetime
         attendance_activity.clock_out_date = date_today
         attendance_activity.out_datetime = out_datetime
         attendance_activity.save()
-    attendance_activities = attendance_activities.filter(~Q(clock_out=None)).filter(
+
+    attendance_activities = attendance_activities.filter(
         attendance_date=attendance_activity.attendance_date
     )
     # Here calculate the total durations between the attendance activities
@@ -355,7 +386,7 @@ def early_out_create(attendance):
     return late_come_obj
 
 
-def early_out(attendance, start_time, end_time):
+def early_out(attendance, start_time, end_time, shift):
     """
     This method is used to mark the early check-out attendance before the shift ends
     args:
@@ -363,9 +394,27 @@ def early_out(attendance, start_time, end_time):
         start_time : attendance day shift start time
         start_end : attendance day shift end time
     """
-
+    if not enable_late_come_early_out_tracking(None).get("tracking"):
+        return
     now_sec = strtime_seconds(attendance.attendance_clock_out.strftime("%H:%M"))
     mid_day_sec = strtime_seconds("12:00")
+    # Checking gracetime allowance before creating early out
+    if shift and shift.grace_time_id:
+        if (
+            shift.grace_time_id.is_active == True
+            and shift.grace_time_id.allowed_clock_out == True
+        ):
+            now_sec += shift.grace_time_id.allowed_time_in_secs
+    elif GraceTime.objects.filter(is_default=True, is_active=True).exists():
+        grace_time = GraceTime.objects.filter(
+            is_default=True,
+            is_active=True,
+        ).first()
+        # Setting allowance for the check out time if grace allocate for clock out event
+        if grace_time.allowed_clock_out:
+            now_sec += grace_time.allowed_time_in_secs
+    else:
+        pass
     if start_time > end_time:
         # Early out condition for night shift
         if now_sec < mid_day_sec:
@@ -421,7 +470,10 @@ def clock_out(request):
     early_out_instance = attendance.late_come_early_out.filter(type="early_out")
     if not early_out_instance.exists():
         early_out(
-            attendance=attendance, start_time=start_time_sec, end_time=end_time_sec
+            attendance=attendance,
+            start_time=start_time_sec,
+            end_time=end_time_sec,
+            shift=shift,
         )
 
     script = ""

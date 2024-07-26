@@ -4,6 +4,7 @@ of form fields and widgets for the corresponding models in the payroll managemen
 """
 
 import datetime
+import logging
 import uuid
 from typing import Any
 
@@ -12,12 +13,11 @@ from django.template.loader import render_to_string
 from django.utils.translation import gettext_lazy as _
 
 import payroll.models.models
-from base import thread_local_middleware
 from base.forms import Form, ModelForm
 from base.methods import reload_queryset
 from employee.filters import EmployeeFilter
 from employee.models import BonusPoint, Employee
-from horilla.decorators import logger
+from horilla import horilla_middlewares
 from horilla_widgets.forms import HorillaForm
 from horilla_widgets.widgets.horilla_multi_select_field import HorillaMultiSelectField
 from horilla_widgets.widgets.select_widgets import HorillaMultiSelectWidget
@@ -31,10 +31,13 @@ from payroll.models.models import (
     LoanAccount,
     MultipleCondition,
     Payslip,
+    PayslipAutoGenerate,
     Reimbursement,
     ReimbursementMultipleAttachment,
 )
 from payroll.widgets import component_widgets as widget
+
+logger = logging.getLogger(__name__)
 
 
 class AllowanceForm(forms.ModelForm):
@@ -69,6 +72,23 @@ class AllowanceForm(forms.ModelForm):
                 }
             kwargs["initial"] = initial
         super().__init__(*args, **kwargs)
+
+        self.fields["specific_employees"] = HorillaMultiSelectField(
+            queryset=Employee.objects.all(),
+            widget=HorillaMultiSelectWidget(
+                filter_route_name="employee-widget-filter",
+                filter_class=EmployeeFilter,
+                filter_instance_contex_name="f",
+                filter_template_path="employee_filters.html",
+                instance=self.instance,
+            ),
+            label="Specific Employees",
+        )
+        self.fields["if_condition"].widget.attrs.update(
+            {
+                "onchange": "rangeToggle($(this))",
+            }
+        )
         reload_queryset(self.fields)
         self.fields["style"].widget = widget.StyleWidget(form=self)
 
@@ -79,6 +99,51 @@ class AllowanceForm(forms.ModelForm):
         context = {"form": self}
         table_html = render_to_string("common_form.html", context)
         return table_html
+
+    def clean(self, *args, **kwargs):
+        cleaned_data = super().clean(*args, **kwargs)
+
+        specific_employees = self.data.getlist("specific_employees")
+        include_all = self.data.get("include_active_employees")
+
+        for field_name, field_instance in self.fields.items():
+            if isinstance(field_instance, HorillaMultiSelectField):
+                self.errors.pop(field_name, None)
+                if not specific_employees and include_all is None:
+                    raise forms.ValidationError({field_name: "This field is required"})
+                cleaned_data = super().clean()
+                data = self.fields[field_name].queryset.filter(
+                    id__in=self.data.getlist(field_name)
+                )
+                cleaned_data[field_name] = data
+        cleaned_data = super().clean()
+
+        if cleaned_data.get("if_condition") == "range":
+            cleaned_data["if_amount"] = 0
+            start_range = cleaned_data.get("start_range")
+            end_range = cleaned_data.get("end_range")
+            if start_range and end_range and end_range <= start_range:
+                raise forms.ValidationError(
+                    {"end_range": "End range cannot be less than start range."}
+                )
+            if not start_range and not end_range:
+                raise forms.ValidationError(
+                    {
+                        "start_range": 'This field is required when condition is "range".',
+                        "end_range": 'This field is required when condition is "range".',
+                    }
+                )
+            elif not start_range:
+                raise forms.ValidationError(
+                    {"start_range": 'This field is required when condition is "range".'}
+                )
+            elif not end_range:
+                raise forms.ValidationError(
+                    {"end_range": 'This field is required when condition is "range".'}
+                )
+        else:
+            cleaned_data["start_range"] = None
+            cleaned_data["end_range"] = None
 
     def save(self, commit: bool = ...) -> Any:
         super().save(commit)
@@ -137,10 +202,72 @@ class DeductionForm(forms.ModelForm):
                 }
             kwargs["initial"] = initial
         super().__init__(*args, **kwargs)
+
+        self.fields["specific_employees"] = HorillaMultiSelectField(
+            queryset=Employee.objects.all(),
+            widget=HorillaMultiSelectWidget(
+                filter_route_name="employee-widget-filter",
+                filter_class=EmployeeFilter,
+                filter_instance_contex_name="f",
+                filter_template_path="employee_filters.html",
+                instance=self.instance,
+            ),
+            label="Specific Employees",
+        )
+        self.fields["if_condition"].widget.attrs.update(
+            {
+                "onchange": "rangeToggle($(this))",
+            }
+        )
         reload_queryset(self.fields)
         self.fields["style"].widget = widget.StyleWidget(form=self)
 
-    def clean(self):
+    def clean(self, *args, **kwargs):
+        cleaned_data = super().clean(*args, **kwargs)
+
+        specific_employees = self.data.getlist("specific_employees")
+        include_all = self.data.get("include_active_employees")
+
+        for field_name, field_instance in self.fields.items():
+            if isinstance(field_instance, HorillaMultiSelectField):
+                self.errors.pop(field_name, None)
+                if not specific_employees and include_all is None:
+                    raise forms.ValidationError({field_name: "This field is required"})
+                cleaned_data = super().clean()
+                data = self.fields[field_name].queryset.filter(
+                    id__in=self.data.getlist(field_name)
+                )
+                cleaned_data[field_name] = data
+        cleaned_data = super().clean()
+
+        if cleaned_data.get("if_condition") == "range":
+            cleaned_data["if_amount"] = 0
+            start_range = cleaned_data.get("start_range")
+            end_range = cleaned_data.get("end_range")
+
+            if start_range and end_range and int(end_range) <= int(start_range):
+                raise forms.ValidationError(
+                    {"end_range": "End range cannot be less than start range."}
+                )
+            if not start_range and not end_range:
+                raise forms.ValidationError(
+                    {
+                        "start_range": 'This field is required when condition is "range".',
+                        "end_range": 'This field is required when condition is "range".',
+                    }
+                )
+            elif not start_range:
+                raise forms.ValidationError(
+                    {"start_range": 'This field is required when condition is "range".'}
+                )
+            elif not end_range:
+                raise forms.ValidationError(
+                    {"end_range": 'This field is required when condition is "range".'}
+                )
+        else:
+            cleaned_data["start_range"] = None
+            cleaned_data["end_range"] = None
+
         if (
             self.data.get("update_compensation") is not None
             and self.data.get("update_compensation") != ""
@@ -162,7 +289,7 @@ class DeductionForm(forms.ModelForm):
                 )
             if self.data.get("amount") is None and self.data.get("amount") == "":
                 raise forms.ValidationError({"amount": _("This field is required.")})
-        return super().clean()
+        return cleaned_data
 
     def as_p(self):
         """
@@ -257,6 +384,7 @@ class GeneratePayslipForm(HorillaForm):
             filter_class=EmployeeFilter,
             filter_instance_contex_name="f",
             filter_template_path="employee_filters.html",
+            required=True,
         ),
         label="Employee",
     )
@@ -267,7 +395,6 @@ class GeneratePayslipForm(HorillaForm):
         cleaned_data = super().clean()
         start_date = cleaned_data.get("start_date")
         end_date = cleaned_data.get("end_date")
-
         today = datetime.date.today()
         if end_date < start_date:
             raise forms.ValidationError(
@@ -572,7 +699,7 @@ class ReimbursementForm(ModelForm):
         if not self.instance.pk:
             self.initial["allowance_on"] = str(datetime.date.today())
 
-        request = getattr(thread_local_middleware._thread_locals, "request", None)
+        request = getattr(horilla_middlewares._thread_locals, "request", None)
         if request:
             employee = (
                 request.user.employee_get
@@ -656,12 +783,13 @@ class ReimbursementForm(ModelForm):
 
     def clean(self):
         cleaned_data = super().clean()
+        request = getattr(horilla_middlewares._thread_locals, "request", None)
         if self.instance.pk:
             employee_id = self.instance.employee_id
             type = self.instance.type
 
         else:
-            employee_id = cleaned_data["employee_id"]
+            employee_id = request.user.employee_get
             type = cleaned_data["type"]
 
         available_points = BonusPoint.objects.filter(employee_id=employee_id).first()
@@ -767,3 +895,18 @@ class ConditionForm(ModelForm):
             "condition",
             "value",
         ]
+
+
+# ===========================Auto payslip generate================================
+class PayslipAutoGenerateForm(ModelForm):
+    class Meta:
+        model = PayslipAutoGenerate
+        fields = ["generate_day", "company_id", "auto_generate"]
+
+    def as_p(self):
+        """
+        Render the form fields as HTML table rows with Bootstrap styling.
+        """
+        context = {"form": self}
+        table_html = render_to_string("common_form.html", context)
+        return table_html

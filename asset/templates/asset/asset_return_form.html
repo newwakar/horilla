@@ -1,12 +1,7 @@
 {% load i18n %}
 <div class="oh-modal__dialog-header">
-  <button
-    type="button"
-    class="oh-modal__close"
-    data-dismiss="oh-modal"
-    aria-label="Close"
-  >
-    <ion-icon name="close-outline"></ion-icon>
+  <button type="button" class="oh-modal_close--custom" onclick="$('#objectCreateModal').removeClass('oh-modal--show');">
+    <ion-icon name="close-outline" role="img" aria-label="close outline" class="md hydrated"></ion-icon>
   </button>
   <span class="oh-modal__dialog-title ml-5" id="addEmployeeObjectiveModalLabel">
     <h5>{% trans "Asset Return Form" %}</h5>
@@ -37,10 +32,10 @@
         <button
           class=" oh-btn oh-btn--info oh-btn--shadow w-100"
           type="button"
-          hx-get="{% url "add-asset-report" asset_id %}"
-          hx-target="#addAssetReportForm"
           data-toggle="oh-modal-toggle"
-          data-target="#addAssetReport"
+          data-target="#dynamicCreateModal"
+          hx-get="{% url "add-asset-report" asset_id %}"
+          hx-target="#dynamicCreateModalTarget"
           >
           {% trans "Add Report" %}
         </button>

@@ -8,10 +8,10 @@ from django.core.paginator import Paginator
 from django.db.models import ProtectedError, Q
 from django.http import HttpResponse, HttpResponseRedirect, JsonResponse
 from django.shortcuts import redirect, render
+from django.urls import reverse
 from django.utils.translation import gettext as _
 from haystack.query import SearchQuerySet
 
-from attendance.methods.group_by import group_by_queryset
 from base.forms import TagsForm
 from base.methods import filtersubordinates, get_key_instances, get_pagination, sortby
 from base.models import Department, JobPosition, Tags
@@ -47,6 +47,7 @@ from horilla.decorators import (
     owner_can_enter,
     permission_required,
 )
+from horilla.group_by import group_by_queryset
 from notifications.signals import notify
 
 # Create your views here.
@@ -470,7 +471,7 @@ def ticket_create(request):
                 verb_es="Se te ha asignado un nuevo ticket",
                 verb_fr="Un nouveau ticket vous a été attribué",
                 icon="infinite",
-                redirect=f"/helpdesk/ticket-detail/{ticket.id}",
+                redirect=reverse("ticket-detail", kwargs={"ticket_id": ticket.id}),
             )
             return HttpResponse("<script>window.location.reload()</script>")
     context = {
@@ -482,7 +483,7 @@ def ticket_create(request):
 
 @login_required
 @hx_request_required
-@owner_can_enter("perms.helpdesk.helpdesk_changeticket", Ticket)
+@owner_can_enter(perm="helpdesk.change_ticket", model=Ticket)
 def ticket_update(request, ticket_id):
     """
     This function is responsible for updating the Ticket.
@@ -516,7 +517,7 @@ def ticket_update(request, ticket_id):
 
 
 @login_required
-@permission_required("helpdesk_changeticket")
+@permission_required("helpdesk.change_ticket")
 def ticket_archive(request, ticket_id):
     """
     This function is responsible for archiving the Ticket.
@@ -541,6 +542,7 @@ def ticket_archive(request, ticket_id):
 
 
 @login_required
+@owner_can_enter(perm="helpdesk.change_ticket", model=Ticket)
 def change_ticket_status(request, ticket_id):
     """
     This function is responsible for changing the Ticket status.
@@ -560,7 +562,7 @@ def change_ticket_status(request, ticket_id):
         if (
             user == ticket.employee_id
             or user in ticket.assigned_to.all()
-            or request.user.has_perm("helpdesk_changeticket")
+            or request.user.has_perm("helpdesk.change_ticket")
         ):
             ticket.status = status
             ticket.save()
@@ -592,7 +594,7 @@ def change_ticket_status(request, ticket_id):
                 verb_es="El estado del ticket ha sido cambiado.",
                 verb_fr="Le statut du ticket a été modifié.",
                 icon="infinite",
-                redirect=f"/helpdesk/ticket-detail/{ticket.id}",
+                redirect=reverse("ticket-detail", kwargs={"ticket_id": ticket.id}),
             )
             mail_thread = TicketSendThread(
                 request,
@@ -612,7 +614,7 @@ def change_ticket_status(request, ticket_id):
 
 
 @login_required
-@owner_can_enter("perms.helpdesk.helpdesk_changeticket", Ticket)
+@owner_can_enter(perm="helpdesk.change_ticket", model=Ticket)
 def ticket_delete(request, ticket_id):
     """
     This function is responsible for deleting the Ticket.
@@ -651,7 +653,7 @@ def ticket_delete(request, ticket_id):
             verb_es="El billete ha sido eliminado.",
             verb_fr="Le ticket a été supprimé.",
             icon="infinite",
-            redirect=f"/helpdesk/ticket-view/",
+            redirect=reverse("ticket-view"),
         )
         ticket.delete()
         messages.success(
@@ -787,6 +789,7 @@ def ticket_filter(request):
 
 
 @login_required
+@owner_can_enter(perm="helpdesk.change_ticket", model=Ticket)
 def ticket_detail(request, ticket_id, **kwargs):
     today = datetime.now().date()
     ticket = Ticket.objects.get(id=ticket_id)
@@ -868,7 +871,7 @@ def ticket_update_tag(request):
 
 @login_required
 @hx_request_required
-@owner_can_enter("perms.helpdesk.helpdesk_changeticket", Ticket)
+@owner_can_enter(perm="helpdesk.change_ticket", model=Ticket)
 def ticket_change_raised_on(request, ticket_id):
     ticket = Ticket.objects.get(id=ticket_id)
     form = TicketRaisedOnForm(instance=ticket)
@@ -887,7 +890,7 @@ def ticket_change_raised_on(request, ticket_id):
 
 @login_required
 @hx_request_required
-@manager_can_enter("helpdesk_changeticket")
+@manager_can_enter("helpdesk.change_ticket")
 def ticket_change_assignees(request, ticket_id):
     ticket = Ticket.objects.get(id=ticket_id)
     prev_assignee_ids = ticket.assigned_to.values_list("id", flat=True)
@@ -1112,7 +1115,7 @@ def tickets_select_filter(request):
 
 
 @login_required
-@permission_required("helpdesk_changeticket")
+@permission_required("helpdesk.change_ticket")
 def tickets_bulk_archive(request):
     """
     This is a ajax method used to archive bulk of Ticket instances
@@ -1168,7 +1171,7 @@ def tickets_bulk_delete(request):
                 verb_es="El billete ha sido eliminado.",
                 verb_fr="Le ticket a été supprimé.",
                 icon="infinite",
-                redirect=f"/helpdesk/ticket-view/",
+                redirect=reverse("ticket-view"),
             )
             ticket.delete()
             messages.success(

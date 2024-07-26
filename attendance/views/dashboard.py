@@ -5,6 +5,7 @@ This module is used to register endpoints for dashboard-related requests
 """
 
 import calendar
+import json
 from datetime import date, datetime, timedelta
 
 from django.db.models import Q, Sum
@@ -105,11 +106,26 @@ def dashboard(request):
         employee_id__is_active=True,
         attendance_overtime_approve=False,
     )
+    ot_attendances = filtersubordinates(
+        request=request,
+        perm="attendance.change_overtime",
+        queryset=ot_attendances,
+    )
 
     validate_attendances = Attendance.objects.filter(
         attendance_validated=False, employee_id__is_active=True
     )
 
+    validate_attendances = filtersubordinates(
+        request=request,
+        perm="attendance.change_overtime",
+        queryset=validate_attendances,
+    )
+    validate_attendances = paginator_qry(validate_attendances, page_number)
+    id_list = [ot.id for ot in ot_attendances]
+    validate_id_list = [val.id for val in validate_attendances]
+    ot_attendances_ids = json.dumps(list(id_list))
+    validate_attendances_ids = json.dumps(list(validate_id_list))
     return render(
         request,
         "attendance/dashboard/dashboard.html",
@@ -124,8 +140,10 @@ def dashboard(request):
             "marked_attendances_ratio": marked_attendances_ratio,
             "on_break": early_outs,
             "overtime_attendances": ot_attendances,
-            "validate_attendances": paginator_qry(validate_attendances, page_number),
+            "validate_attendances": validate_attendances,
             "pd": previous_data,
+            "ot_attendances_ids": ot_attendances_ids,
+            "validate_attendances_ids": validate_attendances_ids,
         },
     )
 
@@ -138,6 +156,12 @@ def validated_attendances_table(request):
     validate_attendances = Attendance.objects.filter(
         attendance_validated=False, employee_id__is_active=True
     )
+    validate_attendances = filtersubordinates(
+        request=request,
+        perm="attendance.change_attendance",
+        queryset=validate_attendances,
+    )
+
     context = {
         "validate_attendances": paginator_qry(validate_attendances, page_number),
         "pd": previous_data,

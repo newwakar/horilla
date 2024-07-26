@@ -23,6 +23,7 @@ class YourForm(forms.Form):
 
 import datetime
 import json
+import logging
 import uuid
 from calendar import month_name
 from collections import OrderedDict
@@ -50,18 +51,19 @@ from attendance.models import (
     strtime_seconds,
     validate_time_format,
 )
-from base import thread_local_middleware
 from base.forms import MultipleFileField
 from base.methods import reload_queryset
 from base.models import Company, EmployeeShift
 from employee.filters import EmployeeFilter
 from employee.models import Employee
-from horilla.decorators import logger
+from horilla import horilla_middlewares
 from horilla_widgets.widgets.horilla_multi_select_field import HorillaMultiSelectField
 from horilla_widgets.widgets.select_widgets import HorillaMultiSelectWidget
 from leave.filters import LeaveRequestFilter
 from leave.models import LeaveType
 from payroll.methods.methods import get_working_days
+
+logger = logging.getLogger(__name__)
 
 
 class ModelForm(forms.ModelForm):
@@ -72,7 +74,7 @@ class ModelForm(forms.ModelForm):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         reload_queryset(self.fields)
-        request = getattr(thread_local_middleware._thread_locals, "request", None)
+        request = getattr(horilla_middlewares._thread_locals, "request", None)
 
         for field_name, field in self.fields.items():
             widget = field.widget
@@ -857,18 +859,10 @@ class GraceTimeForm(ModelForm):
         fields = "__all__"
         widgets = {
             "is_default": forms.HiddenInput(),
-            "allowed_time": forms.TextInput(attrs={"placeholder": "00:00 minutes"}),
+            "allowed_time": forms.TextInput(attrs={"placeholder": "00:00:00 Hours"}),
         }
 
         exclude = ["objects", "allowed_time_in_secs", "is_active"]
-
-    def as_p(self, *args, **kwargs):
-        """
-        Render the form fields as HTML table rows with Bootstrap styling.
-        """
-        context = {"form": self}
-        table_html = render_to_string("attendance_form.html", context)
-        return table_html
 
 
 class AttendanceRequestCommentForm(ModelForm):
@@ -991,7 +985,7 @@ class BulkAttendanceRequestForm(ModelForm):
         )
 
     def __init__(self, *args, **kwargs):
-        request = getattr(thread_local_middleware._thread_locals, "request", None)
+        request = getattr(horilla_middlewares._thread_locals, "request", None)
         employee = request.user.employee_get
         super().__init__(*args, **kwargs)
         if employee and hasattr(employee, "employee_work_info"):
@@ -1075,6 +1069,7 @@ class BulkAttendanceRequestForm(ModelForm):
                 instance.is_validate_request = True
                 instance.employee_id = employee_id
                 instance.request_type = "create_request"
+                instance.is_bulk_request = True
                 instance.save()
             else:
                 logger(form.errors)

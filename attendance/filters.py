@@ -348,7 +348,7 @@ class AttendanceFilters(FilterSet):
     """
 
     id = django_filters.NumberFilter(field_name="id")
-    search = django_filters.CharFilter(method=filter_by_name)
+    search = django_filters.CharFilter(method="filter_by_name")
     employee = django_filters.CharFilter(field_name="employee_id__id")
     date_attendance = django_filters.DateFilter(field_name="attendance_date")
     employee_id = django_filters.ModelMultipleChoiceFilter(
@@ -472,6 +472,7 @@ class AttendanceFilters(FilterSet):
             "attendance_validated",
             "is_validate_request",
             "is_validate_request_approved",
+            "is_bulk_request",
             "at_work_second__lte",
             "at_work_second__gte",
             "overtime_second__lte",

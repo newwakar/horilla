@@ -17,7 +17,7 @@ urlpatterns = [
         name="type-update",
         kwargs={"model": models.LeaveType},
     ),
-    path("type-delete/<int:id>", views.leave_type_delete, name="type-delete"),
+    path("type-delete/<int:obj_id>", views.leave_type_delete, name="type-delete"),
     path("type-filter", views.leave_type_filter, name="type-filter"),
     path("request-creation", views.leave_request_creation, name="request-creation"),
     path(
@@ -48,6 +48,11 @@ urlpatterns = [
         "leave-requests-bulk-approve",
         views.leave_request_bulk_approve,
         name="leave-requests-bulk-approve",
+    ),
+    path(
+        "leave-requests-bulk-reject",
+        views.leave_bulk_reject,
+        name="leave-requests-bulk-reject",
     ),
     path("request-cancel/<int:id>", views.leave_request_cancel, name="request-cancel"),
     path(
@@ -428,5 +433,15 @@ urlpatterns = [
         "create-compensatory-leave-comment/<int:comp_leave_id>/",
         views.create_compensatory_leave_comment,
         name="create-compensatory-leave-comment",
+    ),
+    path(
+        "check-interview-conflicts",
+        views.check_interview_conflicts,
+        name="check-interview-conflicts",
+    ),
+    path(
+        "employee-past-leave-restriction",
+        views.employee_past_leave_restriction,
+        name="employee-past-leave-restriction",
     ),
 ]

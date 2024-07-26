@@ -8,14 +8,14 @@ registered on biometric devices.
 
 import json
 from datetime import datetime
-from threading import Thread
+from threading import Event, Thread
 from urllib.parse import parse_qs, unquote
 
 import pytz
 import requests
 from apscheduler.schedulers.background import BackgroundScheduler
 from django.contrib import messages
-from django.http import HttpResponse, HttpResponseRedirect, JsonResponse
+from django.http import HttpResponse, JsonResponse
 from django.shortcuts import redirect, render
 from django.utils.translation import gettext as __
 from django.utils.translation import gettext_lazy as _
@@ -105,8 +105,18 @@ def biometric_set_time(conn):
 
 
 class META:
+    """
+    Provides access to HTTP metadata keys.
+    """
+
     @classmethod
     def keys(cls):
+        """
+        Retrieve the list of available HTTP metadata keys.
+
+        Returns:
+            list: A list of HTTP metadata keys.
+        """
         return ["HTTP_HX_REQUEST"]
 
 
@@ -146,78 +156,86 @@ class ZKBioAttendance(Thread):
     - machine_ip: The IP address of the ZKTeco biometric device.
     - port_no: The port number for communication with the ZKTeco biometric device.
     - conn: The connection object to the ZKTeco biometric device.
+    - _stop_event: Event flag to signal thread termination.
 
     Methods:
     - run(): Overrides the run method of the Thread class to capture live attendance data.
+    - stop(): Sets the _stop_event to signal the thread to stop gracefully.
     """
 
     def __init__(self, machine_ip, port_no):
+        super().__init__()
         self.machine_ip = machine_ip
         self.port_no = port_no
-        zk_device = ZK(
-            machine_ip,
-            port=port_no,
-            timeout=5,
-            password=0,
-            force_udp=False,
-            ommit_ping=False,
-        )
-        conn = zk_device.connect()
-        self.conn = conn
-        Thread.__init__(self)
+        self._stop_event = Event()  # Initialize stop event
+        self.conn = None
 
     def run(self):
         try:
-            device = BiometricDevices.objects.filter(
-                machine_ip=self.machine_ip, port=self.port_no
-            ).first()
-            if device.is_live:
-                attendances = self.conn.live_capture()
-                for attendance in attendances:
-                    if attendance:
-                        user_id = attendance.user_id
-                        punch_code = attendance.punch
-                        date_time = attendance.timestamp
-                        date = date_time.date()
-                        time = date_time.time()
-                        if device:
-                            device.last_fetch_date = date
-                            device.last_fetch_time = time
-                            device.save()
-                        bio_id = BiometricEmployees.objects.filter(
-                            user_id=user_id
-                        ).first()
-                        if bio_id:
-                            if punch_code in {0, 3, 4}:
-                                try:
-                                    clock_in(
-                                        Request(
-                                            user=bio_id.employee_id.employee_user_id,
-                                            date=date,
-                                            time=time,
-                                            datetime=date_time,
-                                        )
-                                    )
-                                except Exception as error:
-                                    print(f"Got an error in clock_in {error}")
-                                    continue
+            zk_device = ZK(
+                self.machine_ip,
+                port=self.port_no,
+                timeout=5,
+                password=0,
+                force_udp=False,
+                ommit_ping=False,
+            )
+            conn = zk_device.connect()
+            self.conn = conn
+            if conn:
+                device = BiometricDevices.objects.filter(
+                    machine_ip=self.machine_ip, port=self.port_no
+                ).first()
+                if device and device.is_live:
+                    while not self._stop_event.is_set():
+                        attendances = conn.live_capture()
+                        for attendance in attendances:
+                            if attendance:
+                                user_id = attendance.user_id
+                                punch_code = attendance.punch
+                                date_time = attendance.timestamp
+                                date = date_time.date()
+                                time = date_time.time()
+                                device.last_fetch_date = date
+                                device.last_fetch_time = time
+                                device.save()
+                                bio_id = BiometricEmployees.objects.filter(
+                                    user_id=user_id
+                                ).first()
+                                if bio_id:
+                                    if punch_code in {0, 3, 4}:
+                                        try:
+                                            clock_in(
+                                                Request(
+                                                    user=bio_id.employee_id.employee_user_id,
+                                                    date=date,
+                                                    time=time,
+                                                    datetime=date_time,
+                                                )
+                                            )
+                                        except Exception as error:
+                                            print(f"Got an error in clock_in {error}")
+                                            continue
+                                    else:
+                                        try:
+                                            clock_out(
+                                                Request(
+                                                    user=bio_id.employee_id.employee_user_id,
+                                                    date=date,
+                                                    time=time,
+                                                    datetime=date_time,
+                                                )
+                                            )
+                                        except Exception as error:
+                                            print(f"Got an error in clock_out {error}")
+                                            continue
                             else:
-                                try:
-                                    clock_out(
-                                        Request(
-                                            user=bio_id.employee_id.employee_user_id,
-                                            date=date,
-                                            time=time,
-                                            datetime=date_time,
-                                        )
-                                    )
-                                except Exception as error:
-                                    print(f"Got an error in clock_out {error}")
-                                    continue
-                    else:
-                        continue
+                                continue
         except ConnectionResetError as error:
             ZKBioAttendance(self.machine_ip, self.port_no).start()
+
+    def stop(self):
+        self.conn.end_live_capture = True
 
 
 class AnvizBiometricDeviceManager:
@@ -502,12 +520,12 @@ def biometric_device_unschedule(request, device_id):
     Returns:
     - HttpResponseRedirect: Redirects to the biometric devices view after unscheduling.
     """
-    pd = request.GET.urlencode()
+    previous_data = request.GET.urlencode()
     device = BiometricDevices.objects.get(id=device_id)
     device.is_scheduler = False
     device.save()
     messages.success(request, _("Biometric device unscheduled successfully"))
-    return redirect(f"/biometric/search-devices?{pd}")
+    return redirect(f"/biometric/search-devices?{previous_data}")
 
 
 @login_required
@@ -574,13 +592,13 @@ def biometric_device_archive(request, device_id):
     """
     This method is used to archive or un-archive devices
     """
-    pd = request.GET.urlencode()
+    previous_data = request.GET.urlencode()
     device_obj = BiometricDevices.objects.get(id=device_id)
     device_obj.is_active = not device_obj.is_active
     device_obj.save()
     message = _("archived") if not device_obj.is_active else _("un-archived")
     messages.success(request, _("Device is %(message)s") % {"message": message})
-    return redirect(f"/biometric/search-devices?{pd}")
+    return redirect(f"/biometric/search-devices?{previous_data}")
 
 
 @login_required
@@ -602,9 +620,9 @@ def biometric_device_delete(request, device_id):
     """
     device = BiometricDevices.objects.get(id=device_id)
     device.delete()
-    pd = request.GET.urlencode()
+    previous_data = request.GET.urlencode()
     messages.success(request, _("Biometric device deleted successfully."))
-    return redirect(f"/biometric/search-devices?{pd}")
+    return redirect(f"/biometric/search-devices?{previous_data}")
 
 
 @login_required
@@ -1287,17 +1305,16 @@ def edit_cosec_user(request, user_id, device_id):
                         request, _("Biometric user data updated successfully")
                     )
                     return HttpResponse("<script>window.location.reload()</script>")
-                else:
-                    if update_user.get("error"):
-                        error = update_user.get("error")
-                        if "validity-date-yyyy" in error:
-                            form.add_error(
-                                None,
-                                _(
-                                    "This date cannot be used as the Validity End Date for\
-                                    the COSEC Biometric."
-                                ),
-                            )
+                if update_user.get("error"):
+                    error = update_user.get("error")
+                    if "validity-date-yyyy" in error:
+                        form.add_error(
+                            None,
+                            _(
+                                "This date cannot be used as the Validity End Date for\
+                                the COSEC Biometric."
+                            ),
+                        )
         return render(
             request,
             "biometric/edit_cosec_user.html",
@@ -1384,8 +1401,8 @@ def bio_users_bulk_delete(request):
             ommit_ping=False,
         )
         conn = zk_device.connect()
-        for id in ids:
-            user_id = int(id)
+        for user_id in ids:
+            user_id = int(user_id)
             conn.delete_user(user_id=user_id)
             employee_bio = BiometricEmployees.objects.filter(user_id=user_id).first()
             employee_bio.delete()
@@ -1427,21 +1444,19 @@ def cosec_users_bulk_delete(request):
             device.cosec_username,
             device.cosec_password,
         )
-        for id in ids:
-            cosec.delete_cosec_user(user_id=id)
+        for user_id in ids:
+            cosec.delete_cosec_user(user_id=user_id)
             employee_bio = BiometricEmployees.objects.filter(
-                user_id=id, device_id=device
+                user_id=user_id, device_id=device
             ).first()
             if employee_bio:
                 employee_bio.delete()
             messages.success(
                 request,
-                _(
-                    "{} successfully removed from the biometric device.".format(
-                        employee_bio.employee_id
-                    ),
-                ),
+                f"{employee_bio.employee_id} "
+                + _("successfully removed from the biometric device."),
             )
+
     except Exception as error:
         print(f"An error occurred: {error}")
     return JsonResponse({"messages": "Success"})
@@ -1509,20 +1524,13 @@ def add_biometric_user(request, device_id):
                             name=employee_name,
                             password="",
                             group_id="",
-                            user_id=(
-                                employee.badge_id
-                                if employee.badge_id.isalnum()
-                                else str(user_id)
-                            ),
+                            user_id=str(user_id),
                             card=0,
                         )
+                        # The ZK Biometric user ID must be a character value that can be converted to an integer.
                         BiometricEmployees.objects.create(
                             uid=uid,
-                            user_id=(
-                                employee.badge_id
-                                if employee.badge_id.isalnum()
-                                else str(user_id)
-                            ),
+                            user_id=str(user_id),
                             employee_id=employee,
                             device_id=device,
                         )
@@ -1575,7 +1583,7 @@ def add_biometric_user(request, device_id):
                         )
                         response = user.get("Response-Code")
                         if response and response == "0":
-                            employee_bio = BiometricEmployees.objects.create(
+                            BiometricEmployees.objects.create(
                                 ref_user_id=ref_user_id,
                                 user_id=user_id,
                                 employee_id=employee,
@@ -1607,7 +1615,7 @@ def biometric_device_live(request):
     is_live = request.GET.get("is_live")
     device_id = request.GET.get("deviceId")
     device = BiometricDevices.objects.get(id=device_id)
-    is_live = True if is_live == "on" else False
+    is_live = is_live == "on"
     if is_live:
         port_no = device.port
         machine_ip = device.machine_ip
@@ -1643,7 +1651,7 @@ def biometric_device_live(request):
                     });
                     </script>
                 """
-        except Exception as error:
+        except TimeoutError as error:
             device.is_live = False
             device.save()
             print(f"An error comes in biometric_device_live {error}")
@@ -1729,28 +1737,20 @@ def zk_biometric_device_attendance(device_id):
                 time = date_time.time()
                 bio_id = BiometricEmployees.objects.filter(user_id=user_id).first()
                 if bio_id:
+                    request_data = Request(
+                        user=bio_id.employee_id.employee_user_id,
+                        date=date,
+                        time=time,
+                        datetime=date_time,
+                    )
                     if punch_code in {0, 3, 4}:
                         try:
-                            clock_in(
-                                Request(
-                                    user=bio_id.employee_id.employee_user_id,
-                                    date=date,
-                                    time=time,
-                                    datetime=date_time,
-                                )
-                            )
+                            clock_in(request_data)
                         except Exception as error:
                             print(f"Got an error : {error}")
                     else:
                         try:
-                            clock_out(
-                                Request(
-                                    user=bio_id.employee_id.employee_user_id,
-                                    date=date,
-                                    time=time,
-                                    datetime=date_time,
-                                )
-                            )
+                            clock_out(request_data)
                         except Exception as error:
                             print(f"Got an error : {error}")
         except Exception as error:
@@ -1766,45 +1766,37 @@ def anviz_biometric_device_attendance(device_id):
 
     :param device_id: The Object Id of the Anviz biometric device.
     """
-    anviz_device = AnvizBiometricDeviceManager(device_id)
-    attendance_records = anviz_device.get_attendance_records()
-    for attendance in attendance_records["payload"]["list"]:
-        badge_id = attendance["employee"]["workno"]
-        punch_code = attendance["checktype"]
-        date_time_obj = datetime.strptime(
-            attendance["checktime"], "%Y-%m-%dT%H:%M:%S%z"
-        )
-        target_timezone = pytz.timezone(settings.TIME_ZONE)
-
-        date_time_obj = date_time_obj.astimezone(target_timezone)
-        employee = Employee.objects.filter(badge_id=badge_id).first()
-        if employee:
-            if punch_code in {0, 128}:
-                try:
-                    clock_in(
-                        Request(
-                            user=employee.employee_user_id,
-                            date=date_time_obj.date(),
-                            time=date_time_obj.time(),
-                            datetime=date_time_obj,
-                        )
-                    )
-                except Exception as error:
-                    print(f"Error in clock in {error}")
-
-            else:
-                try:
-                    # // 1 , 129 checktype check out and door close
-                    clock_out(
-                        Request(
-                            user=employee.employee_user_id,
-                            date=date_time_obj.date(),
-                            time=date_time_obj.time(),
-                            datetime=date_time_obj,
-                        )
-                    )
-                except Exception as error:
-                    print(f"Error in clock out {error}")
+    device = BiometricDevices.objects.get(id=device_id)
+    if device.is_scheduler:
+        anviz_device = AnvizBiometricDeviceManager(device_id)
+        attendance_records = anviz_device.get_attendance_records()
+        for attendance in attendance_records["payload"]["list"]:
+            badge_id = attendance["employee"]["workno"]
+            punch_code = attendance["checktype"]
+            date_time_obj = datetime.strptime(
+                attendance["checktime"], "%Y-%m-%dT%H:%M:%S%z"
+            )
+            target_timezone = pytz.timezone(settings.TIME_ZONE)
+            date_time_obj = date_time_obj.astimezone(target_timezone)
+            employee = Employee.objects.filter(badge_id=badge_id).first()
+            if employee:
+                request_data = Request(
+                    user=employee.employee_user_id,
+                    date=date_time_obj.date(),
+                    time=date_time_obj.time(),
+                    datetime=date_time_obj,
+                )
+                if punch_code in {0, 128}:
+                    try:
+                        clock_in(request_data)
+                    except Exception as error:
+                        print(f"Error in clock in {error}")
+                else:
+                    try:
+                        # // 1 , 129 check type check out and door close
+                        clock_out(request_data)
+                    except Exception as error:
+                        print(f"Error in clock out {error}")
 
 
 def cosec_biometric_device_attendance(device_id):
@@ -1818,11 +1810,15 @@ def cosec_biometric_device_attendance(device_id):
         device_id (uuid): The ID of the COSEC biometric device.
     """
     device = BiometricDevices.objects.get(id=device_id)
+    if not device.is_scheduler:
+        return
+
     device_args = COSECAttendanceArguments.objects.filter(device_id=device).first()
     last_fetch_roll_ovr_count = (
         int(device_args.last_fetch_roll_ovr_count) if device_args else 0
     )
     last_fetch_seq_number = int(device_args.last_fetch_seq_number) if device_args else 1
+
     cosec = COSECBiometric(
         device.machine_ip,
         device.port,
@@ -1833,56 +1829,52 @@ def cosec_biometric_device_attendance(device_id):
     attendances = cosec.get_attendance_events(
         last_fetch_roll_ovr_count, last_fetch_seq_number
     )
-    if isinstance(attendances, list):
-        if device_args and attendances:
-            attendances.pop(0)
-        for attendance in attendances:
-            employee = BiometricEmployees.objects.filter(
-                ref_user_id=attendance["detail-1"]
-            ).first()
-            if employee:
-                date_str = attendance["date"]
-                time_str = attendance["time"]
-                attendance_date = datetime.strptime(date_str, "%d/%m/%Y").date()
-                attendance_time = datetime.strptime(time_str, "%H:%M:%S").time()
-                attendance_datetime = datetime.combine(attendance_date, attendance_time)
-                punch_code = attendance["detail-2"]
-                if punch_code in ["1", "3", "5", "7", "9"]:
-                    try:
-                        clock_in(
-                            Request(
-                                user=employee.employee_id.employee_user_id,
-                                date=attendance_date,
-                                time=attendance_time,
-                                datetime=attendance_datetime,
-                            )
-                        )
-                    except Exception as error:
-                        print(f"Error in clock in {error}")
-                elif punch_code in ["2", "4", "6", "8", "10"]:
-                    try:
-                        clock_out(
-                            Request(
-                                user=employee.employee_id.employee_user_id,
-                                date=attendance_date,
-                                time=attendance_time,
-                                datetime=attendance_datetime,
-                            )
-                        )
-                    except Exception as error:
-                        print(f"Error in clock out {error}")
-                else:
-                    pass
 
-        if attendances:
-            last_attendance = attendances[-1]
-            COSECAttendanceArguments.objects.update_or_create(
-                device_id=device,
-                defaults={
-                    "last_fetch_roll_ovr_count": last_attendance["roll-over-count"],
-                    "last_fetch_seq_number": last_attendance["seq-No"],
-                },
-            )
+    if not isinstance(attendances, list):
+        return
+
+    if device_args and attendances:
+        attendances.pop(0)
+
+    for attendance in attendances:
+        ref_user_id = attendance["detail-1"]
+        employee = BiometricEmployees.objects.filter(ref_user_id=ref_user_id).first()
+        if not employee:
+            continue
+
+        date_str = attendance["date"]
+        time_str = attendance["time"]
+        attendance_date = datetime.strptime(date_str, "%d/%m/%Y").date()
+        attendance_time = datetime.strptime(time_str, "%H:%M:%S").time()
+        attendance_datetime = datetime.combine(attendance_date, attendance_time)
+        punch_code = attendance["detail-2"]
+
+        request_data = Request(
+            user=employee.employee_id.employee_user_id,
+            date=attendance_date,
+            time=attendance_time,
+            datetime=attendance_datetime,
+        )
+
+        try:
+            if punch_code in ["1", "3", "5", "7", "9"]:
+                clock_in(request_data)
+            elif punch_code in ["2", "4", "6", "8", "10"]:
+                clock_out(request_data)
+            else:
+                pass
+        except Exception as error:
+            print(f"Error processing attendance: {error}")
+
+    if attendances:
+        last_attendance = attendances[-1]
+        COSECAttendanceArguments.objects.update_or_create(
+            device_id=device,
+            defaults={
+                "last_fetch_roll_ovr_count": last_attendance["roll-over-count"],
+                "last_fetch_seq_number": last_attendance["seq-No"],
+            },
+        )
 
 
 try:

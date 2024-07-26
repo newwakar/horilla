@@ -15,10 +15,10 @@ from django.contrib import messages
 from django.db.models import ProtectedError, Q
 from django.http import HttpResponse, HttpResponseRedirect, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
+from django.urls import reverse
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
-from attendance.methods.group_by import group_by_queryset
 from base.methods import (
     closest_numbers,
     export_data,
@@ -35,16 +35,22 @@ from horilla.decorators import (
     owner_can_enter,
     permission_required,
 )
+from horilla.group_by import group_by_queryset
 from notifications.signals import notify
 from payroll.context_processors import get_active_employees
 from payroll.filters import ContractFilter, ContractReGroup, PayslipFilter
-from payroll.forms.component_forms import ContractExportFieldForm, PayrollSettingsForm
+from payroll.forms.component_forms import (
+    ContractExportFieldForm,
+    PayrollSettingsForm,
+    PayslipAutoGenerateForm,
+)
 from payroll.methods.methods import paginator_qry, save_payslip
 from payroll.models.models import (
     Contract,
     FilingStatus,
     PayrollGeneralSetting,
     Payslip,
+    PayslipAutoGenerate,
     Reimbursement,
     ReimbursementFile,
     ReimbursementrequestComment,
@@ -1026,7 +1032,6 @@ def payslip_export(request):
             start_date = datetime.strptime(start_date_str, "%Y-%m-%d").date()
             end_date = datetime.strptime(end_date_str, "%Y-%m-%d").date()
 
-            # Print the formatted date for each format
             for format_name, format_string in date_formats.items():
                 if format_name == date_format:
                     formatted_start_date = start_date.strftime(format_string)
@@ -1485,7 +1490,7 @@ def payslip_pdf(request, id):
         data["host"] = request.get_host()
         data["protocol"] = "https" if request.is_secure() else "http"
 
-    return generate_pdf("payroll/payslip/individual_pdf.html", context=data)
+    return generate_pdf("payroll/payslip/individual_pdf.html", context=data, html=False)
 
 
 @login_required
@@ -1608,7 +1613,7 @@ def create_payrollrequest_comment(request, payroll_id):
                         verb_de=f"{payroll.employee_id}s Rückerstattungsantrag hat einen Kommentar erhalten.",
                         verb_es=f"La solicitud de reembolso de gastos de {payroll.employee_id} ha recibido un comentario.",
                         verb_fr=f"La demande de remboursement de frais de {payroll.employee_id} a reçu un commentaire.",
-                        redirect="/payroll/view-reimbursement",
+                        redirect=reverse("view-reimbursement"),
                         icon="chatbox-ellipses",
                     )
                 elif (
@@ -1624,7 +1629,7 @@ def create_payrollrequest_comment(request, payroll_id):
                         verb_de="Ihr Rückerstattungsantrag hat einen Kommentar erhalten.",
                         verb_es="Tu solicitud de reembolso ha recibido un comentario.",
                         verb_fr="Votre demande de remboursement a reçu un commentaire.",
-                        redirect="/payroll/view-reimbursement",
+                        redirect=reverse("view-reimbursement"),
                         icon="chatbox-ellipses",
                     )
                 else:
@@ -1640,7 +1645,7 @@ def create_payrollrequest_comment(request, payroll_id):
                         verb_de=f"{payroll.employee_id}s Rückerstattungsantrag hat einen Kommentar erhalten.",
                         verb_es=f"La solicitud de reembolso de gastos de {payroll.employee_id} ha recibido un comentario.",
                         verb_fr=f"La demande de remboursement de frais de {payroll.employee_id} a reçu un commentaire.",
-                        redirect="/payroll/view-reimbursement",
+                        redirect=reverse("view-reimbursement"),
                         icon="chatbox-ellipses",
                     )
             else:
@@ -1653,7 +1658,7 @@ def create_payrollrequest_comment(request, payroll_id):
                     verb_de="Ihr Rückerstattungsantrag hat einen Kommentar erhalten.",
                     verb_es="Tu solicitud de reembolso ha recibido un comentario.",
                     verb_fr="Votre demande de remboursement a reçu un commentaire.",
-                    redirect="/payroll/view-reimbursement",
+                    redirect=reverse("view-reimbursement"),
                     icon="chatbox-ellipses",
                 )
 
@@ -1762,4 +1767,101 @@ def initial_notice_period(request):
     settings.notice_period = max(notice_period, 0)
     settings.save()
     messages.success(request, "Initial notice period updated")
+    return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+
+
+# ===========================Auto payslip generate================================
+
+
+@login_required
+@permission_required("payroll.view_PayslipAutoGenerate")
+def auto_payslip_settings_view(request):
+    payslip_auto_generate = PayslipAutoGenerate.objects.all()
+    print("All autopayslip", payslip_auto_generate)
+
+    context = {"payslip_auto_generate": payslip_auto_generate}
+    return render(request, "payroll/settings/auto_payslip_settings.html", context)
+
+
+@login_required
+@hx_request_required
+@permission_required("payroll.change_PayslipAutoGenerate")
+def create_or_update_auto_payslip(request, auto_id=None):
+    auto_payslip = None
+    if auto_id:
+        auto_payslip = PayslipAutoGenerate.objects.get(id=auto_id)
+    form = PayslipAutoGenerateForm(instance=auto_payslip)
+    if request.method == "POST":
+        form = PayslipAutoGenerateForm(request.POST, instance=auto_payslip)
+        if form.is_valid():
+            auto_payslip = form.save()
+            company = (
+                auto_payslip.company_id if auto_payslip.company_id else "All company"
+            )
+            messages.success(
+                request, _(f"Payslip Auto generate for {company} created successfully ")
+            )
+            return HttpResponse("<script>window.location.reload()</script>")
+    return render(
+        request, "payroll/settings/auto_payslip_create_or_update.html", {"form": form}
+    )
+
+
+@login_required
+@permission_required("payroll.change_PayslipAutoGenerate")
+def activate_auto_payslip_generate(request):
+    """
+    ajax function to update is active field in grace time.
+    Args:
+    - isChecked: Boolean value representing the state of grace time,
+    - autoId: Id of PayslipAutoGenerate object
+    """
+    isChecked = request.POST.get("isChecked")
+    autoId = request.POST.get("autoId")
+    payslip_auto = PayslipAutoGenerate.objects.get(id=autoId)
+    if isChecked == "true":
+        payslip_auto.auto_generate = True
+        response = {
+            "type": "success",
+            "message": _("Auto paslip generate activated successfully."),
+        }
+    else:
+        payslip_auto.auto_generate = False
+        response = {
+            "type": "success",
+            "message": _("Auto paslip generate deactivated successfully."),
+        }
+    payslip_auto.save()
+    return JsonResponse(response)
+
+
+@login_required
+@hx_request_required
+@permission_required("payroll.delete_PayslipAutoGenerate")
+def delete_auto_payslip(request, auto_id):
+    """
+    Delete a PayslipAutoGenerate object.
+
+    Args:
+        auto_id: The ID of PayslipAutoGenerate object to delete.
+
+    Returns:
+        Redirects to the contract view after successfully deleting the contract.
+
+    """
+    try:
+        auto_payslip = PayslipAutoGenerate.objects.get(id=auto_id)
+        if not auto_payslip.auto_generate:
+            company = (
+                auto_payslip.company_id if auto_payslip.company_id else "All company"
+            )
+            auto_payslip.delete()
+            messages.success(
+                request, _(f"Payslip auto generate for {company} deleted successfully.")
+            )
+        else:
+            messages.info(request, _(f"Active 'Payslip auto generate' cannot delete."))
+        return HttpResponse("<script>window.location.reload();</script>")
+    except PayslipAutoGenerate.DoesNotExist:
+        messages.error(request, _("Payslip auto generate not found."))
     return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
